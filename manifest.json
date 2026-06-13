@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "Vinted Label Printer",
+  "version": "1.0.0",
+  "description": "Auto-download Vinted shipping labels, add SKU codes, merge and print",
+  "permissions": [
+    "storage",
+    "downloads",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.vinted.pl/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "commands": {
+    "scan-labels": {
+      "suggested_key": {
+        "default": "Alt+V"
+      },
+      "description": "Scan and download today's labels"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["pages/merge.html", "lib/pdf-lib.min.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.vinted.pl/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

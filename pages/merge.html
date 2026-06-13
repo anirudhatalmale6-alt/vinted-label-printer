@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Vinted Label Merger</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      color: #333;
+      padding: 30px;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    h1 {
+      color: #09B1BA;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      color: #666;
+      margin-bottom: 24px;
+      font-size: 14px;
+    }
+    .section {
+      background: white;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 20px;
+      border: 1px solid #e0e0e0;
+    }
+    .section h2 {
+      font-size: 16px;
+      margin-bottom: 16px;
+      color: #2d2d2d;
+    }
+    .drop-zone {
+      border: 2px dashed #ccc;
+      border-radius: 8px;
+      padding: 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-bottom: 16px;
+    }
+    .drop-zone:hover, .drop-zone.dragover {
+      border-color: #09B1BA;
+      background: #f0fafb;
+    }
+    .drop-zone p { color: #666; margin-bottom: 8px; }
+    .drop-zone .hint { font-size: 12px; color: #999; }
+    input[type="file"] { display: none; }
+    .file-list {
+      list-style: none;
+      margin-top: 12px;
+    }
+    .file-list li {
+      padding: 8px 12px;
+      background: #f9f9f9;
+      border-radius: 4px;
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+    }
+    .file-list li .remove {
+      color: #e74c3c;
+      cursor: pointer;
+      font-size: 18px;
+      padding: 0 4px;
+    }
+    .btn {
+      padding: 14px 28px;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+      margin-right: 10px;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-merge { background: #09B1BA; color: white; }
+    .btn-print { background: #2d2d2d; color: white; }
+    .btn-clear { background: #e74c3c; color: white; }
+    .buttons { margin-top: 16px; }
+    .status {
+      margin-top: 16px;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      display: none;
+    }
+    .status.show { display: block; }
+    .status.success { background: #e8f5e9; color: #27ae60; }
+    .status.error { background: #fdecea; color: #e74c3c; }
+    .status.info { background: #e3f2fd; color: #2980b9; }
+    .storage-labels {
+      margin-top: 12px;
+    }
+    .storage-labels .count {
+      font-size: 24px;
+      font-weight: 700;
+      color: #09B1BA;
+    }
+    .preview-container {
+      margin-top: 16px;
+    }
+    .preview-container iframe {
+      width: 100%;
+      height: 500px;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Vinted Label Merger</h1>
+  <p class="subtitle">Merge labels from all profiles into a single PDF for printing</p>
+
+  <div class="section">
+    <h2>Option 1: Merge from collected labels (this profile)</h2>
+    <div class="storage-labels">
+      <span class="count" id="storageCount">0</span> labels collected today in this profile
+    </div>
+    <div class="buttons">
+      <button class="btn btn-merge" id="btnMergeStorage">Merge Collected Labels</button>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Option 2: Import PDF files from all profiles</h2>
+    <p style="font-size: 13px; color: #666; margin-bottom: 12px;">
+      Drag & drop or select individual label PDFs from your VintedLabels download folder.
+      These are the files saved by clicking "Scan" in each profile.
+    </p>
+    <div class="drop-zone" id="dropZone">
+      <p>Drop PDF files here</p>
+      <p class="hint">or click to select files</p>
+    </div>
+    <input type="file" id="fileInput" multiple accept=".pdf">
+    <ul class="file-list" id="fileList"></ul>
+    <div class="buttons">
+      <button class="btn btn-merge" id="btnMergeFiles" disabled>Merge Selected Files</button>
+      <button class="btn btn-clear" id="btnClear" style="display:none">Clear</button>
+    </div>
+  </div>
+
+  <div class="section" id="resultSection" style="display:none">
+    <h2>Merged PDF</h2>
+    <div class="buttons">
+      <button class="btn btn-print" id="btnPrint">Print Merged PDF</button>
+      <button class="btn btn-merge" id="btnDownload">Download PDF</button>
+    </div>
+    <div class="preview-container">
+      <iframe id="pdfPreview"></iframe>
+    </div>
+  </div>
+
+  <div class="status" id="statusMsg"></div>
+
+  <script src="../lib/pdf-lib.min.js"></script>
+  <script>
+    const { PDFDocument } = PDFLib;
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const fileList = document.getElementById('fileList');
+    const btnMergeFiles = document.getElementById('btnMergeFiles');
+    const btnMergeStorage = document.getElementById('btnMergeStorage');
+    const btnClear = document.getElementById('btnClear');
+    const btnPrint = document.getElementById('btnPrint');
+    const btnDownload = document.getElementById('btnDownload');
+    const statusMsg = document.getElementById('statusMsg');
+    const resultSection = document.getElementById('resultSection');
+    const pdfPreview = document.getElementById('pdfPreview');
+    const storageCount = document.getElementById('storageCount');
+
+    let selectedFiles = [];
+    let mergedPdfUrl = null;
+    let mergedPdfBytes = null;
+
+    chrome.storage.local.get('collectedLabels', (data) => {
+      const today = new Date().toISOString().split('T')[0];
+      const todayLabels = (data.collectedLabels || []).filter(l => l.date === today);
+      storageCount.textContent = todayLabels.length;
+      if (todayLabels.length === 0) {
+        btnMergeStorage.disabled = true;
+      }
+    });
+
+    function showStatus(msg, type) {
+      statusMsg.textContent = msg;
+      statusMsg.className = 'status show ' + type;
+    }
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.classList.remove('dragover');
+    });
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      addFiles(Array.from(e.dataTransfer.files).filter(f => f.type === 'application/pdf'));
+    });
+    fileInput.addEventListener('change', (e) => {
+      addFiles(Array.from(e.target.files));
+    });
+
+    function addFiles(files) {
+      selectedFiles.push(...files);
+      updateFileList();
+    }
+
+    function updateFileList() {
+      fileList.innerHTML = '';
+      selectedFiles.forEach((f, i) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span>${f.name} (${(f.size / 1024).toFixed(1)} KB)</span>
+                         <span class="remove" data-idx="${i}">&times;</span>`;
+        fileList.appendChild(li);
+      });
+      btnMergeFiles.disabled = selectedFiles.length === 0;
+      btnClear.style.display = selectedFiles.length > 0 ? 'inline-block' : 'none';
+    }
+
+    fileList.addEventListener('click', (e) => {
+      if (e.target.classList.contains('remove')) {
+        selectedFiles.splice(parseInt(e.target.dataset.idx), 1);
+        updateFileList();
+      }
+    });
+
+    btnClear.addEventListener('click', () => {
+      selectedFiles = [];
+      updateFileList();
+    });
+
+    async function mergePdfs(pdfBytesList) {
+      const merged = await PDFDocument.create();
+      for (const bytes of pdfBytesList) {
+        try {
+          const src = await PDFDocument.load(bytes);
+          const pages = await merged.copyPages(src, src.getPageIndices());
+          pages.forEach(p => merged.addPage(p));
+        } catch (err) {
+          console.error('Error loading PDF:', err);
+        }
+      }
+      return merged.save();
+    }
+
+    btnMergeStorage.addEventListener('click', async () => {
+      btnMergeStorage.disabled = true;
+      btnMergeStorage.textContent = 'Merging...';
+      showStatus('Merging collected labels...', 'info');
+
+      try {
+        const data = await new Promise(r => chrome.storage.local.get('collectedLabels', r));
+        const today = new Date().toISOString().split('T')[0];
+        const todayLabels = (data.collectedLabels || []).filter(l => l.date === today);
+
+        const pdfBytesList = todayLabels.map(label => {
+          const binaryStr = atob(label.pdfBase64);
+          const bytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i);
+          }
+          return bytes;
+        });
+
+        mergedPdfBytes = await mergePdfs(pdfBytesList);
+        showMergedPdf(mergedPdfBytes, todayLabels.length);
+        showStatus(`Merged ${todayLabels.length} labels successfully!`, 'success');
+      } catch (err) {
+        showStatus('Error: ' + err.message, 'error');
+      }
+
+      btnMergeStorage.disabled = false;
+      btnMergeStorage.textContent = 'Merge Collected Labels';
+    });
+
+    btnMergeFiles.addEventListener('click', async () => {
+      btnMergeFiles.disabled = true;
+      btnMergeFiles.textContent = 'Merging...';
+      showStatus('Reading and merging PDF files...', 'info');
+
+      try {
+        const pdfBytesList = await Promise.all(
+          selectedFiles.map(f => f.arrayBuffer().then(b => new Uint8Array(b)))
+        );
+
+        mergedPdfBytes = await mergePdfs(pdfBytesList);
+        showMergedPdf(mergedPdfBytes, selectedFiles.length);
+        showStatus(`Merged ${selectedFiles.length} PDF files successfully!`, 'success');
+      } catch (err) {
+        showStatus('Error: ' + err.message, 'error');
+      }
+
+      btnMergeFiles.disabled = false;
+      btnMergeFiles.textContent = 'Merge Selected Files';
+    });
+
+    function showMergedPdf(bytes, count) {
+      if (mergedPdfUrl) URL.revokeObjectURL(mergedPdfUrl);
+      const blob = new Blob([bytes], { type: 'application/pdf' });
+      mergedPdfUrl = URL.createObjectURL(blob);
+      pdfPreview.src = mergedPdfUrl;
+      resultSection.style.display = 'block';
+      resultSection.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    btnPrint.addEventListener('click', () => {
+      if (mergedPdfUrl) {
+        const printWindow = window.open(mergedPdfUrl, '_blank');
+        if (printWindow) {
+          printWindow.addEventListener('load', () => {
+            printWindow.print();
+          });
+        }
+      }
+    });
+
+    btnDownload.addEventListener('click', () => {
+      if (mergedPdfBytes) {
+        const blob = new Blob([mergedPdfBytes], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const today = new Date().toISOString().split('T')[0];
+        chrome.downloads.download({
+          url: url,
+          filename: `VintedLabels/MERGED_${today}.pdf`,
+          saveAs: true
+        });
+      }
+    });
+  </script>
+</body>
+</html>

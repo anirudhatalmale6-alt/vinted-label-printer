@@ -1,0 +1,69 @@
+VINTED LABEL PRINTER - Installation Guide
+==========================================
+
+STEP 1: Download the extension
+-------------------------------
+Download or clone the entire "vinted-label-extension" folder to your computer.
+
+STEP 2: Install in Brave (repeat for EACH profile)
+---------------------------------------------------
+1. Open a Brave profile
+2. Go to: brave://extensions/
+3. Enable "Developer mode" (toggle in top right)
+4. Click "Load unpacked"
+5. Select the "vinted-label-extension" folder
+6. The extension icon (teal V) will appear in your toolbar
+
+IMPORTANT: You need to install the extension in EVERY Brave profile
+that has a Vinted account. Each profile is separate.
+
+STEP 3: Set up each profile
+----------------------------
+1. Click the extension icon
+2. Enter a profile name (e.g. "Account1", "ShopA")
+   This name helps identify which labels came from which account.
+
+STEP 4: Daily workflow
+-----------------------
+At the end of the day:
+
+1. In EACH Brave profile:
+   - Make sure you're on vinted.pl (any page)
+   - Click the extension icon
+   - Click "Scan & Download Today's Labels"
+   - Wait for it to finish
+   (Shortcut: Alt+V opens the extension quickly)
+
+2. In ANY one profile:
+   - Click "Open Full Merge Tool"
+   - Drag & drop all the individual label PDFs from your
+     Downloads/VintedLabels/[today's date]/ folder
+   - Click "Merge Selected Files"
+   - Click "Print" to send to your AIMO 6XL printer
+
+Alternative: If you only want labels from one profile,
+just click "Merge All Labels into PDF" in the popup.
+
+FOLDER STRUCTURE
+----------------
+Labels are saved to:
+  Downloads/VintedLabels/2024-01-15/AccountName_SKU_TransactionID.pdf
+
+Merged PDFs are saved to:
+  Downloads/VintedLabels/MERGED_2024-01-15.pdf
+
+SKU DETECTION
+-------------
+The extension reads the last 2-4 characters from the product title
+as the SKU code. Examples:
+  "Wide pants black A247" -> A247
+  "Red dress V19"         -> V19
+  "Shoes #M100"           -> M100
+
+TROUBLESHOOTING
+---------------
+- Extension not finding orders? Make sure you're logged into vinted.pl
+  in that profile and have the vinted.pl tab open.
+- Labels not downloading? Check that the order status allows label download.
+- Wrong SKU? The extension takes the last 2-4 alphanumeric characters
+  (letter + 1-3 digits) from the title.
