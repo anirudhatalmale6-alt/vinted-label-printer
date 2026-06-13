@@ -135,6 +135,133 @@ async function addSkuToPdf(pdfBytes, skuCode) {
   return pdfDoc.save();
 }
 
+async function getLabelFromConversation(order) {
+  const convUrl = `https://www.vinted.pl/inbox/${order.conversationId}`;
+
+  return new Promise(async (resolve) => {
+    let convTab = null;
+    let resolved = false;
+
+    const cleanup = () => {
+      if (convTab) {
+        chrome.tabs.remove(convTab.id).catch(() => {});
+      }
+    };
+
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        resolve({ error: 'Timeout loading conversation page' });
+      }
+    }, 30000);
+
+    try {
+      // Create tab in background
+      convTab = await chrome.tabs.create({ url: convUrl, active: false });
+
+      // Wait for tab to finish loading
+      const waitForLoad = () => new Promise((res) => {
+        const listener = (tabId, changeInfo) => {
+          if (tabId === convTab.id && changeInfo.status === 'complete') {
+            chrome.tabs.onUpdated.removeListener(listener);
+            res();
+          }
+        };
+        chrome.tabs.onUpdated.addListener(listener);
+      });
+
+      await waitForLoad();
+
+      // Wait extra time for RSC data to stream in
+      await new Promise(r => setTimeout(r, 4000));
+
+      // Search for S3 URL in the loaded page
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: convTab.id },
+        func: () => {
+          const html = document.documentElement.outerHTML;
+          const patterns = [
+            /https?:\/\/svc-shipping-labels\.s3[^\s"'<>)}\]\\]+/g,
+            /svc-shipping-labels\.s3\.eu-central-1\.amazonaws\.com\/[^\s"'<>)}\]\\]+/g,
+          ];
+
+          for (const pat of patterns) {
+            const matches = html.match(pat);
+            if (matches) {
+              let url = matches[0];
+              if (!url.startsWith('http')) url = 'https://' + url;
+              // Decode various escape formats
+              url = url.replace(/\\u0026/g, '&').replace(/\\u003d/g, '=')
+                       .replace(/\\\//g, '/').replace(/&amp;/g, '&');
+              return { found: true, url };
+            }
+          }
+
+          // Search all script text content
+          const scripts = document.querySelectorAll('script');
+          for (const s of scripts) {
+            const text = s.textContent || '';
+            if (text.includes('svc-shipping-labels') || text.includes('shipping-labels.s3')) {
+              // Extract with wider character class to get full URL including query params
+              const match = text.match(/svc-shipping-labels\.s3[^"'\\})\]\s]+/);
+              if (match) {
+                let url = 'https://' + match[0];
+                url = url.replace(/\\u0026/g, '&').replace(/\\u003d/g, '=')
+                         .replace(/\\\//g, '/');
+                return { found: true, url, source: 'script' };
+              }
+            }
+          }
+
+          return { found: false, length: html.length };
+        }
+      });
+
+      const searchResult = results[0]?.result;
+
+      if (searchResult && searchResult.found && searchResult.url) {
+        log(`Found S3 URL for label!`, 'success');
+
+        // Download the PDF from S3
+        const pdfResp = await fetch(searchResult.url);
+        if (pdfResp.ok) {
+          const blob = await pdfResp.blob();
+          if (blob.size > 100) {
+            const reader = new FileReader();
+            const base64 = await new Promise((res) => {
+              reader.onload = () => res(reader.result.split(',')[1]);
+              reader.readAsDataURL(blob);
+            });
+
+            clearTimeout(timeout);
+            resolved = true;
+            cleanup();
+            resolve({ pdfBase64: base64 });
+            return;
+          }
+        }
+        clearTimeout(timeout);
+        resolved = true;
+        cleanup();
+        resolve({ error: 'Found S3 URL but could not download PDF' });
+      } else {
+        clearTimeout(timeout);
+        resolved = true;
+        cleanup();
+        resolve({ error: `S3 URL not found in conversation page (${searchResult?.length || 0} chars scanned)` });
+      }
+    } catch (err) {
+      clearTimeout(timeout);
+      if (!resolved) {
+        resolved = true;
+        cleanup();
+        resolve({ error: `Tab error: ${err.message}` });
+      }
+    }
+  });
+}
+
 async function scanLabels() {
   btnScan.disabled = true;
   btnScan.textContent = 'Scanning...';
@@ -199,11 +326,9 @@ async function scanLabels() {
 
         log(`Processing: "${order.title}" -> SKU: ${sku}`, 'info');
 
-        // Download label via content script (uses page cookies)
-        const labelResult = await chrome.tabs.sendMessage(tab.id, {
-          action: 'downloadLabel',
-          order: order
-        });
+        // Open the conversation page to extract S3 label URL
+        log(`Opening conversation page for ${sku}...`, 'info');
+        const labelResult = await getLabelFromConversation(order);
 
         if (!labelResult || labelResult.error) {
           log(`Label download failed for ${sku}: ${labelResult?.error || 'unknown error'}`, 'error');

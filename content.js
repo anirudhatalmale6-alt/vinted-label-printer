@@ -43,8 +43,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg.action === 'downloadLabel') {
-    downloadLabel(msg.order).then(sendResponse);
+  if (msg.action === 'findS3Url') {
+    findS3UrlInPage().then(sendResponse);
     return true;
   }
 });
@@ -104,160 +104,57 @@ async function fetchSoldOrders() {
   }
 }
 
-async function downloadLabel(order) {
-  const convId = order.conversationId;
-  const txId = order.transactionId;
-  const shipmentId = order.shipmentId;
+// Search the fully-loaded page DOM for S3 label URLs
+async function findS3UrlInPage() {
+  // Wait a moment for any remaining RSC data to load
+  await new Promise(r => setTimeout(r, 2000));
 
-  // APPROACH 1: Fetch the conversation page and extract S3 label URL from RSC data
-  try {
-    const pageResp = await fetch(`https://www.vinted.pl/inbox/${convId}`, {
-      credentials: 'include',
-      headers: { 'Accept': 'text/html, */*' },
-    });
-    if (pageResp.ok) {
-      const html = await pageResp.text();
-      const s3Url = extractS3LabelUrl(html);
-      if (s3Url) {
-        const pdfResp = await fetch(s3Url);
-        if (pdfResp.ok) {
-          const blob = await pdfResp.blob();
-          if (blob.size > 100) {
-            return await blobToBase64(blob);
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.error('Page fetch error:', err);
-  }
+  // Search the full document HTML
+  const fullHtml = document.documentElement.outerHTML;
 
-  // APPROACH 2: Fetch conversation API and search for S3 URL
-  try {
-    const convResult = await tryFetchJson(`https://www.vinted.pl/api/v2/conversations/${convId}`);
-    if (convResult.ok) {
-      const s3Url = findS3Url(JSON.stringify(convResult.data));
-      if (s3Url) {
-        const pdfResp = await fetch(s3Url);
-        if (pdfResp.ok) {
-          const blob = await pdfResp.blob();
-          if (blob.size > 100) return await blobToBase64(blob);
-        }
-      }
-    }
-  } catch {}
-
-  // APPROACH 3: Fetch transaction API and search for S3 URL
-  try {
-    const txResult = await tryFetchJson(`https://www.vinted.pl/api/v2/transactions/${txId}`);
-    if (txResult.ok) {
-      const s3Url = findS3Url(JSON.stringify(txResult.data));
-      if (s3Url) {
-        const pdfResp = await fetch(s3Url);
-        if (pdfResp.ok) {
-          const blob = await pdfResp.blob();
-          if (blob.size > 100) return await blobToBase64(blob);
-        }
-      }
-    }
-  } catch {}
-
-  // APPROACH 4: Try shipment endpoint directly
-  if (shipmentId) {
-    const shipmentUrls = [
-      `https://www.vinted.pl/api/v2/shipments/${shipmentId}`,
-      `https://www.vinted.pl/api/v2/shipments/${shipmentId}/label`,
-    ];
-    for (const url of shipmentUrls) {
-      try {
-        const resp = await fetch(url, { credentials: 'include', headers: getAuthHeaders() });
-        if (resp.ok) {
-          const ct = resp.headers.get('content-type') || '';
-          if (ct.includes('json')) {
-            const data = await resp.json();
-            const s3Url = findS3Url(JSON.stringify(data));
-            if (s3Url) {
-              const pdfResp = await fetch(s3Url);
-              if (pdfResp.ok) {
-                const blob = await pdfResp.blob();
-                if (blob.size > 100) return await blobToBase64(blob);
-              }
-            }
-          } else if (ct.includes('pdf') || ct.includes('octet')) {
-            const blob = await resp.blob();
-            if (blob.size > 100) return await blobToBase64(blob);
-          }
-        }
-      } catch {}
-    }
-  }
-
-  return { error: 'Could not find label S3 URL in page or API data.' };
-}
-
-function extractS3LabelUrl(html) {
-  // Search for S3 label URLs in the page HTML (including RSC script data)
+  // Search for S3 label URLs (may be escaped in various ways)
   const patterns = [
-    /https?:\/\/svc-shipping-labels\.s3[^"'\s\\)]+/g,
-    /https?:\/\/[^"'\s]*amazonaws\.com[^"'\s]*(?:label|pdf)[^"'\s]*/gi,
-    /svc-shipping-labels\.s3\.eu-central-1\.amazonaws\.com[^"'\s\\)]+/g,
+    /https?:\/\/svc-shipping-labels\.s3[^\s"'<>\\]+/g,
+    /svc-shipping-labels\.s3\.eu-central-1\.amazonaws\.com[^\s"'<>\\]+/g,
+    /svc-shipping-labels\.s3[^"'<>\s})\]]+/g,
   ];
 
-  for (const pattern of patterns) {
-    const matches = html.match(pattern);
-    if (matches && matches.length > 0) {
+  for (const pat of patterns) {
+    const matches = fullHtml.match(pat);
+    if (matches) {
       let url = matches[0];
-      // Clean up escaped characters from JSON in RSC data
+      if (!url.startsWith('http')) url = 'https://' + url;
       url = url.replace(/\\u0026/g, '&').replace(/\\u003d/g, '=')
-               .replace(/\\\//g, '/').replace(/\\"/g, '"')
-               .replace(/&amp;/g, '&');
-      return url;
+               .replace(/\\\//g, '/').replace(/&amp;/g, '&')
+               .replace(/\\u003c/g, '<').replace(/\\u003e/g, '>');
+      return { found: true, url };
     }
   }
 
-  // Also search in __next_f.push data which contains RSC payload
-  const rscChunks = html.match(/self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)/g);
-  if (rscChunks) {
-    for (const chunk of rscChunks) {
-      const content = chunk.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-      const s3Match = content.match(/svc-shipping-labels\.s3[^"'\s\\)]+/);
-      if (s3Match) {
-        let url = 'https://' + s3Match[0];
+  // Also search all script element text content (RSC payloads)
+  const scripts = document.querySelectorAll('script');
+  for (const s of scripts) {
+    const text = s.textContent || '';
+    if (text.includes('svc-shipping-labels') || text.includes('shipping-labels.s3')) {
+      const match = text.match(/svc-shipping-labels\.s3[^\s"'\\})\]]+/);
+      if (match) {
+        let url = 'https://' + match[0];
         url = url.replace(/\\u0026/g, '&').replace(/\\u003d/g, '=')
-                 .replace(/\\\//g, '/').replace(/&amp;/g, '&');
-        return url;
+                 .replace(/\\\//g, '/');
+        return { found: true, url, source: 'script' };
       }
     }
   }
 
-  return null;
-}
-
-function findS3Url(jsonStr) {
-  const match = jsonStr.match(/https?:\/\/svc-shipping-labels\.s3[^"'\s\\]+/);
-  if (match) {
-    let url = match[0];
-    url = url.replace(/\\u0026/g, '&').replace(/\\u003d/g, '=')
-             .replace(/\\\//g, '/').replace(/&amp;/g, '&');
-    return url;
+  // Search in all text nodes (in case URL is in a hidden element)
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const text = walker.currentNode.textContent || '';
+    if (text.includes('svc-shipping-labels')) {
+      const match = text.match(/https?:\/\/svc-shipping-labels[^\s"']+/);
+      if (match) return { found: true, url: match[0], source: 'text' };
+    }
   }
 
-  // Also try any amazonaws PDF URL
-  const awsMatch = jsonStr.match(/https?:\/\/[^"]*amazonaws\.com[^"]*\.pdf[^"]*/);
-  if (awsMatch) {
-    let url = awsMatch[0];
-    url = url.replace(/\\\//g, '/');
-    return url;
-  }
-
-  return null;
-}
-
-async function blobToBase64(blob) {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve({ pdfBase64: reader.result.split(',')[1] });
-    reader.onerror = () => resolve({ error: 'Failed to read blob' });
-    reader.readAsDataURL(blob);
-  });
+  return { found: false, htmlLength: fullHtml.length };
 }
