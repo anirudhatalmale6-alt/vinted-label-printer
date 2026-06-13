@@ -103,21 +103,35 @@ async function addSkuToPdf(pdfBytes, skuCode) {
 
   for (const page of pages) {
     const { width, height } = page.getSize();
-    const fontSize = 14;
-    const textWidth = font.widthOfTextAtSize(skuCode, fontSize);
-    const margin = 10;
 
+    // Crop the page to remove bottom whitespace
+    // Shipping labels typically use top ~65% of an A4/letter page
+    const cropHeight = Math.min(height, height * 0.62);
+    const cropBottom = height - cropHeight;
+
+    page.setCropBox(0, cropBottom, width, height);
+    page.setMediaBox(0, cropBottom, width, height);
+
+    // Place SKU in bottom-right corner of the cropped area
+    const fontSize = 18;
+    const textWidth = font.widthOfTextAtSize(skuCode, fontSize);
+    const margin = 8;
+    const skuY = cropBottom + margin;
+    const skuX = width - textWidth - margin;
+
+    // White background
     page.drawRectangle({
-      x: width - textWidth - margin - 6,
-      y: margin - 2,
-      width: textWidth + 12,
-      height: fontSize + 8,
+      x: skuX - 5,
+      y: skuY - 3,
+      width: textWidth + 10,
+      height: fontSize + 6,
       color: rgb(1, 1, 1),
     });
 
+    // SKU text bold black
     page.drawText(skuCode, {
-      x: width - textWidth - margin,
-      y: margin + 2,
+      x: skuX,
+      y: skuY,
       size: fontSize,
       font: font,
       color: rgb(0, 0, 0),
