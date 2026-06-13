@@ -165,9 +165,14 @@ async function getLabelFromConversation(order) {
       // Wait for page to fully render (RSC streaming)
       await new Promise(r => setTimeout(r, 5000));
 
+      // Record tabs before clicking so we can detect + close any new ones
+      const tabsBefore = (await chrome.tabs.query({})).map(t => t.id);
+
       // Click the "Wydrukuj etykietę wysyłkową" button and capture the S3 URL
+      // MUST run in MAIN world to override the page's window.open
       const results = await chrome.scripting.executeScript({
         target: { tabId: convTab.id },
+        world: 'MAIN',
         func: () => {
           return new Promise((resolve) => {
             // Override window.open to capture URL without opening a new tab
@@ -251,6 +256,15 @@ async function getLabelFromConversation(order) {
       });
 
       const searchResult = results[0]?.result;
+
+      // Close any new tabs that opened (label PDF tabs)
+      try {
+        const tabsAfter = (await chrome.tabs.query({})).map(t => t.id);
+        const newTabs = tabsAfter.filter(id => !tabsBefore.includes(id) && id !== convTab.id);
+        for (const newTabId of newTabs) {
+          chrome.tabs.remove(newTabId).catch(() => {});
+        }
+      } catch {}
 
       if (searchResult && searchResult.found && searchResult.url) {
         log(`Captured S3 URL!`, 'success');
