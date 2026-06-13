@@ -362,3 +362,46 @@ document.getElementById('btnMergePage').addEventListener('click', () => {
 });
 
 document.getElementById('btnDiagnose').addEventListener('click', runDiagnostics);
+
+// CAPTURE MODE
+document.getElementById('btnCapture').addEventListener('click', async () => {
+  const tab = await getActiveVintedTab();
+  if (!tab) {
+    log('Open vinted.pl first!', 'error');
+    return;
+  }
+
+  await ensureContentScript(tab.id);
+  await chrome.tabs.sendMessage(tab.id, { action: 'startCapture' });
+
+  document.getElementById('captureHelp').style.display = 'block';
+  document.getElementById('btnShowCaptured').style.display = 'block';
+  document.getElementById('btnCapture').textContent = 'Capture Mode ON';
+  document.getElementById('btnCapture').style.background = '#27ae60';
+
+  log('Capture mode activated! Now go to a buyer conversation and click the label download button on the Vinted page. Then come back here.', 'success');
+});
+
+document.getElementById('btnShowCaptured').addEventListener('click', async () => {
+  const tab = await getActiveVintedTab();
+  if (!tab) {
+    log('Open vinted.pl first!', 'error');
+    return;
+  }
+
+  await ensureContentScript(tab.id);
+  const result = await chrome.tabs.sendMessage(tab.id, { action: 'getCaptured' });
+  const captured = result?.captured || [];
+
+  log(`=== CAPTURED REQUESTS (${captured.length}) ===`, 'info');
+  for (const c of captured) {
+    if (c.type === 'click') {
+      log(`CLICK: <${c.tagName}> "${c.text}" href="${c.href}" class="${c.className}"`, 'success');
+    } else {
+      const pdf = c.isPdf ? ' [PDF!]' : '';
+      log(`${c.method || 'GET'} ${c.url} -> ${c.status} (${c.contentType})${pdf}`, c.isPdf ? 'success' : 'info');
+    }
+  }
+  log('=== END CAPTURED ===', 'info');
+  log('Copy this and send it to me!', 'info');
+});

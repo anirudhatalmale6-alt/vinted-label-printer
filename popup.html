@@ -154,9 +154,23 @@
       Shortcut: <kbd>Alt+V</kbd> to scan labels
     </div>
 
+    <button class="btn" id="btnCapture"
+      style="background:#e74c3c;color:white;margin-top:8px;font-size:13px;padding:10px;">
+      Capture Mode - Find Label URL
+    </button>
+    <p id="captureHelp" style="display:none;font-size:11px;color:#666;margin:8px 0;padding:8px;background:white;border-radius:8px;border:1px solid #e0e0e0;">
+      Capture mode is ON. Now go to a conversation with a buyer and
+      manually click the "Download label" button on vinted.pl.
+      Then come back here and click "Show Captured Requests".
+    </p>
+    <button class="btn" id="btnShowCaptured"
+      style="display:none;background:#27ae60;color:white;font-size:12px;padding:8px;">
+      Show Captured Requests
+    </button>
+
     <button class="btn" id="btnDiagnose"
       style="background:#f39c12;color:white;margin-top:8px;font-size:12px;padding:8px;">
-      Diagnose Connection (if scan doesn't work)
+      Diagnose (shows available_actions + page buttons)
     </button>
 
     <div class="status" id="statusLog"></div>

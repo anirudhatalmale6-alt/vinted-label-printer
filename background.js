@@ -17,15 +17,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg.action === 'clearOldLabels') {
-    chrome.storage.local.get('collectedLabels', (data) => {
-      const today = new Date().toISOString().split('T')[0];
-      const labels = (data.collectedLabels || []).filter(l => l.date === today);
-      chrome.storage.local.set({ collectedLabels: labels }, () => {
-        sendResponse({ cleared: true });
-      });
-    });
-    return true;
+  if (msg.action === 'capturedRequest') {
+    console.log('[Vinted Label] Captured request:', msg.entry);
+    if (msg.entry.isPdf) {
+      console.log('[Vinted Label] FOUND PDF DOWNLOAD URL:', msg.entry.url);
+    }
+  }
+
+  if (msg.action === 'capturedClick') {
+    console.log('[Vinted Label] Captured click:', msg.text, msg.href);
   }
 });
 
