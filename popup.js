@@ -202,7 +202,7 @@ async function scanLabels() {
         // Download label via content script (uses page cookies)
         const labelResult = await chrome.tabs.sendMessage(tab.id, {
           action: 'downloadLabel',
-          transactionId: order.transactionId
+          order: order
         });
 
         if (!labelResult || labelResult.error) {
@@ -348,25 +348,36 @@ async function runDiagnostics() {
       } else if (r.check && r.check.startsWith('API:')) {
         const status = r.ok ? 'success' : 'error';
         let detail = `${r.check} -> HTTP ${r.status}`;
-        if (r.ok && r.responseKeys) {
-          detail += ` | Keys: ${r.responseKeys.join(', ')}`;
-          for (const key of r.responseKeys) {
-            if (r[`${key}_count`] !== undefined) {
-              detail += ` | ${key}: ${r[`${key}_count`]} items`;
-            }
-            if (r[`${key}_first_keys`]) {
-              detail += ` | Fields: ${r[`${key}_first_keys`].slice(0, 8).join(', ')}`;
-            }
-          }
+        if (r.ok && r.count !== undefined) {
+          detail += ` | ${r.count} orders`;
+          if (r.allKeys) detail += ` | Fields: ${r.allKeys.join(', ')}`;
+          if (r.firstOrder) detail += ` | First: ${JSON.stringify(r.firstOrder).substring(0, 300)}`;
         }
-        if (r.error) detail += ` | Error: ${r.error}`;
         log(detail, status);
-      } else if (r.check === 'Page scrape') {
-        log(`Page links: ${r.orderLinksCount} order links, ${r.transactionLinksCount} shipment links`, 'info');
+      } else if (r.check && r.check.startsWith('Detail:')) {
+        const status = r.ok ? 'success' : 'error';
+        let detail = `${r.check} -> HTTP ${r.status}`;
+        if (r.ok) {
+          if (r.keys) detail += ` | Keys: ${r.keys.join(', ')}`;
+          if (r.shipmentKeys) detail += ` | Shipment: ${r.shipmentKeys.join(', ')}`;
+          if (r.shipmentData) detail += ` | ShipmentData: ${JSON.stringify(r.shipmentData).substring(0, 400)}`;
+          if (r.labelRelatedFields) detail += ` | LabelFields: ${r.labelRelatedFields.join(', ')}`;
+          if (r.fullData) detail += ` | FULL: ${JSON.stringify(r.fullData).substring(0, 500)}`;
+        }
+        log(detail, status);
+      } else if (r.check && r.check.startsWith('Label URL:')) {
+        const status = r.ok ? 'success' : 'error';
+        let detail = `${r.check} -> HTTP ${r.status}`;
+        if (r.ok) {
+          detail += ` | Type: ${r.contentType}`;
+          if (r.isPdf) detail += ' | PDF!';
+          if (r.dataKeys && r.dataKeys.length) detail += ` | Keys: ${r.dataKeys.join(', ')}`;
+        }
+        log(detail, status);
       }
     }
     log('=== END DIAGNOSTICS ===', 'info');
-    log('Please screenshot this log and send it to me!', 'info');
+    log('Please copy ALL text from this log and send it to me!', 'info');
 
   } catch (err) {
     log(`Diagnostic error: ${err.message}`, 'error');
