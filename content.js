@@ -24,11 +24,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ captured: window.__vintedCaptured || [] });
     return true;
   }
-
-  if (msg.action === 'findDownloadButton') {
-    findLabelButton().then(sendResponse);
-    return true;
-  }
 });
 
 function getCsrfToken() {
@@ -37,10 +32,10 @@ function getCsrfToken() {
   return null;
 }
 
-function getAuthHeaders() {
+function getAuthHeaders(accept) {
   const csrf = getCsrfToken();
   const headers = {
-    'Accept': 'application/json, text/plain, */*',
+    'Accept': accept || 'application/json, text/plain, */*',
     'X-Requested-With': 'XMLHttpRequest',
   };
   if (csrf) headers['X-CSRF-Token'] = csrf;
@@ -58,6 +53,59 @@ async function tryFetchJson(url) {
   }
 }
 
+async function tryPostJson(url, body) {
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        ...getAuthHeaders(),
+        'Content-Type': 'application/json',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const ct = resp.headers.get('content-type') || '';
+    if (ct.includes('pdf') || ct.includes('octet-stream')) {
+      const blob = await resp.blob();
+      return { ok: resp.ok, status: resp.status, blob, isPdf: true };
+    }
+    if (ct.includes('json')) {
+      const data = await resp.json();
+      return { ok: resp.ok, status: resp.status, data };
+    }
+    const text = await resp.text();
+    return { ok: resp.ok, status: resp.status, text: text.substring(0, 500), contentType: ct };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+async function tryFetchPdf(url, method) {
+  try {
+    const opts = {
+      method: method || 'GET',
+      credentials: 'include',
+      headers: getAuthHeaders('application/pdf, application/octet-stream, */*'),
+    };
+    const resp = await fetch(url, opts);
+    if (!resp.ok) return { ok: false, status: resp.status };
+    const ct = resp.headers.get('content-type') || '';
+    if (ct.includes('pdf') || ct.includes('octet-stream')) {
+      const blob = await resp.blob();
+      return { ok: true, blob };
+    }
+    if (ct.includes('json')) {
+      const data = await resp.json();
+      return { ok: true, isJson: true, data };
+    }
+    const blob = await resp.blob();
+    if (blob.size > 500) return { ok: true, blob };
+    return { ok: false, status: resp.status, contentType: ct };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
 async function blobToBase64(blob) {
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -67,165 +115,126 @@ async function blobToBase64(blob) {
   });
 }
 
-// NETWORK CAPTURE: Override fetch to capture all requests/responses
+// Network capture with window.open and blob URL interception
 function startNetworkCapture() {
   if (window.__vintedCaptureActive) return;
   window.__vintedCaptureActive = true;
   window.__vintedCaptured = [];
 
+  // Intercept fetch
   const origFetch = window.fetch;
   window.fetch = async function(...args) {
     const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
     const opts = args[1] || {};
-
     const resp = await origFetch.apply(this, args);
 
-    // Capture everything that's not an image
-    if (!url.includes('images1.vinted.net') && !url.includes('.jpeg') && !url.includes('.png')) {
+    if (!url.includes('images1.vinted.net') && !url.includes('.jpeg') && !url.includes('.png') && !url.includes('.svg')) {
       const ct = resp.headers.get('content-type') || '';
-      const entry = {
+      window.__vintedCaptured.push({
+        type: 'fetch',
         url,
         method: opts.method || 'GET',
         status: resp.status,
         contentType: ct,
-        headers: Object.fromEntries(resp.headers.entries()),
+        isPdf: ct.includes('pdf') || ct.includes('octet'),
         time: new Date().toISOString(),
-      };
-
-      // If it's a PDF or octet-stream, mark it
-      if (ct.includes('pdf') || ct.includes('octet-stream')) {
-        entry.isPdf = true;
-        entry.size = resp.headers.get('content-length');
-      }
-
-      window.__vintedCaptured.push(entry);
-
-      // Also send to extension immediately if it looks like a label
-      if (entry.isPdf || url.includes('label') || url.includes('shipment') || url.includes('parcel')) {
-        chrome.runtime.sendMessage({
-          action: 'capturedRequest',
-          entry
-        });
-      }
+      });
     }
-
     return resp;
   };
 
-  // Also capture XMLHttpRequest
+  // Intercept XMLHttpRequest
   const origOpen = XMLHttpRequest.prototype.open;
   const origSend = XMLHttpRequest.prototype.send;
-
   XMLHttpRequest.prototype.open = function(method, url, ...rest) {
     this.__captureUrl = url;
     this.__captureMethod = method;
     return origOpen.call(this, method, url, ...rest);
   };
-
   XMLHttpRequest.prototype.send = function(...args) {
     this.addEventListener('load', function() {
       const url = this.__captureUrl || '';
       if (!url.includes('images1.vinted.net') && !url.includes('.jpeg')) {
         const ct = this.getResponseHeader('content-type') || '';
-        const entry = {
+        window.__vintedCaptured.push({
+          type: 'xhr',
           url,
           method: this.__captureMethod || 'GET',
           status: this.status,
           contentType: ct,
+          isPdf: ct.includes('pdf') || ct.includes('octet'),
           time: new Date().toISOString(),
-          viaXHR: true,
-        };
-        if (ct.includes('pdf') || ct.includes('octet-stream')) {
-          entry.isPdf = true;
-        }
-        window.__vintedCaptured.push(entry);
-
-        if (entry.isPdf || url.includes('label') || url.includes('shipment') || url.includes('parcel')) {
-          chrome.runtime.sendMessage({ action: 'capturedRequest', entry });
-        }
+        });
       }
     });
     return origSend.apply(this, args);
   };
 
-  // Monitor link clicks and downloads
-  document.addEventListener('click', function(e) {
-    const target = e.target.closest('a, button, [role="button"]');
-    if (target) {
-      const text = (target.textContent || '').toLowerCase();
-      const href = target.getAttribute('href') || '';
-      if (text.includes('etykiet') || text.includes('label') || text.includes('pobierz') ||
-          text.includes('download') || text.includes('paczk') || text.includes('nadaj') ||
-          href.includes('label') || href.includes('shipment')) {
-        window.__vintedCaptured.push({
-          type: 'click',
-          tagName: target.tagName,
-          text: target.textContent.trim().substring(0, 100),
-          href: href,
-          className: target.className,
-          time: new Date().toISOString(),
-        });
-        chrome.runtime.sendMessage({
-          action: 'capturedClick',
-          text: target.textContent.trim().substring(0, 100),
-          href: href,
-          className: target.className,
-        });
-      }
+  // Intercept window.open
+  const origWindowOpen = window.open;
+  window.open = function(url, ...rest) {
+    window.__vintedCaptured.push({
+      type: 'window.open',
+      url: url || '',
+      time: new Date().toISOString(),
+    });
+    return origWindowOpen.apply(this, [url, ...rest]);
+  };
+
+  // Intercept createElement for dynamic <a> downloads
+  const origCreateElement = document.createElement.bind(document);
+  document.createElement = function(tag, ...rest) {
+    const el = origCreateElement(tag, ...rest);
+    if (tag.toLowerCase() === 'a') {
+      const origClick = el.click.bind(el);
+      el.click = function() {
+        if (el.href || el.download) {
+          window.__vintedCaptured.push({
+            type: 'dynamic-link-click',
+            href: el.href,
+            download: el.download,
+            time: new Date().toISOString(),
+          });
+        }
+        return origClick();
+      };
     }
-  }, true);
-}
+    return el;
+  };
 
-// Find the download button on the page
-async function findLabelButton() {
-  const results = [];
-
-  // Search for all buttons and links
-  const allClickable = document.querySelectorAll('a, button, [role="button"], [role="link"]');
-  const keywords = ['etykiet', 'label', 'pobierz', 'download', 'paczk', 'nadaj', 'wyślij', 'wysłij', 'shipping', 'wydruk', 'druk', 'print'];
-
-  for (const el of allClickable) {
-    const text = (el.textContent || '').toLowerCase().trim();
-    const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-    const title = (el.getAttribute('title') || '').toLowerCase();
-    const href = el.getAttribute('href') || '';
-    const dataTestId = el.getAttribute('data-testid') || '';
-
-    const allText = text + ' ' + ariaLabel + ' ' + title + ' ' + href + ' ' + dataTestId;
-
-    if (keywords.some(kw => allText.includes(kw))) {
-      results.push({
-        tag: el.tagName,
-        text: text.substring(0, 100),
-        href: href,
-        ariaLabel: ariaLabel,
-        title: title,
-        dataTestId: dataTestId,
-        className: (el.className || '').toString().substring(0, 100),
-        id: el.id || '',
-        outerHTML: el.outerHTML.substring(0, 300),
+  // Intercept URL.createObjectURL for blob URLs
+  const origCreateObjectURL = URL.createObjectURL;
+  URL.createObjectURL = function(blob) {
+    const url = origCreateObjectURL(blob);
+    if (blob && blob.type) {
+      window.__vintedCaptured.push({
+        type: 'blob-url',
+        blobType: blob.type,
+        blobSize: blob.size,
+        url: url,
+        isPdf: blob.type.includes('pdf'),
+        time: new Date().toISOString(),
       });
     }
-  }
+    return url;
+  };
 
-  // Also search for any element with "etykiet" in any attribute
-  const allElements = document.querySelectorAll('*');
-  for (const el of allElements) {
-    for (const attr of el.attributes) {
-      if (keywords.some(kw => attr.value.toLowerCase().includes(kw))) {
-        results.push({
-          tag: el.tagName,
-          attr: `${attr.name}="${attr.value}"`,
-          text: (el.textContent || '').trim().substring(0, 50),
-          outerHTML: el.outerHTML.substring(0, 300),
-          viaAttr: true,
-        });
-        break;
-      }
+  // Listen for all clicks
+  document.addEventListener('click', function(e) {
+    const target = e.target.closest('a, button, [role="button"], [data-testid]');
+    if (target) {
+      window.__vintedCaptured.push({
+        type: 'click',
+        tag: target.tagName,
+        text: (target.textContent || '').trim().substring(0, 100),
+        href: target.getAttribute('href') || '',
+        className: (target.className || '').toString().substring(0, 100),
+        dataTestId: target.getAttribute('data-testid') || '',
+        ariaLabel: target.getAttribute('aria-label') || '',
+        time: new Date().toISOString(),
+      });
     }
-  }
-
-  return { buttons: results, totalClickable: allClickable.length };
+  }, true);
 }
 
 async function fetchSoldOrders() {
@@ -245,9 +254,12 @@ async function fetchSoldOrders() {
       if (!title || !txId) continue;
 
       let shipmentId = null;
+      let availableActions = null;
       const txResult = await tryFetchJson(`https://www.vinted.pl/api/v2/transactions/${txId}`);
-      if (txResult.ok && txResult.data?.transaction?.shipment) {
-        shipmentId = String(txResult.data.transaction.shipment.id || '');
+      if (txResult.ok && txResult.data?.transaction) {
+        const tx = txResult.data.transaction;
+        shipmentId = tx.shipment ? String(tx.shipment.id || '') : null;
+        availableActions = tx.available_actions || [];
       }
 
       orders.push({
@@ -255,9 +267,9 @@ async function fetchSoldOrders() {
         transactionId: txId,
         conversationId: convId,
         shipmentId,
+        availableActions,
         status: (item.status || '').toLowerCase(),
         date: item.date || '',
-        availableActions: txResult.ok ? txResult.data?.transaction?.available_actions : null,
       });
     }
 
@@ -272,61 +284,81 @@ async function downloadLabel(order) {
   const convId = order.conversationId;
   const shipmentId = order.shipmentId;
 
-  // Check if we have a captured label URL pattern stored
-  const stored = await new Promise(r => chrome.storage.local.get('labelUrlPattern', r));
-  if (stored.labelUrlPattern) {
-    const url = stored.labelUrlPattern
-      .replace('{txId}', txId)
-      .replace('{shipmentId}', shipmentId)
-      .replace('{convId}', convId);
-    try {
-      const resp = await fetch(url, {
-        credentials: 'include',
-        headers: { ...getAuthHeaders(), 'Accept': 'application/pdf, */*' }
-      });
-      if (resp.ok) {
-        const blob = await resp.blob();
-        if (blob.size > 100) return await blobToBase64(blob);
+  // APPROACH 1: Try "send_shipping_label" action via POST
+  const postEndpoints = [
+    { url: `https://www.vinted.pl/api/v2/transactions/${txId}/send_shipping_label`, body: null },
+    { url: `https://www.vinted.pl/api/v2/transactions/${txId}/shipping_label`, body: null },
+    { url: `https://www.vinted.pl/api/v2/transactions/${txId}/actions/send_shipping_label`, body: null },
+    { url: `https://www.vinted.pl/api/v2/shipments/${shipmentId}/send_label`, body: null },
+    { url: `https://www.vinted.pl/api/v2/shipments/${shipmentId}/label`, body: null },
+  ];
+
+  for (const ep of postEndpoints) {
+    const result = await tryPostJson(ep.url, ep.body);
+    if (result.ok) {
+      if (result.blob) return await blobToBase64(result.blob);
+      if (result.data) {
+        // The response might contain a URL to download the label
+        const str = JSON.stringify(result.data);
+        const urlMatch = str.match(/"(https?:[^"]*(?:label|pdf|download)[^"]*)"/i);
+        if (urlMatch) {
+          const pdfUrl = urlMatch[1].replace(/\\\//g, '/');
+          const pdfResult = await tryFetchPdf(pdfUrl);
+          if (pdfResult.ok && pdfResult.blob) return await blobToBase64(pdfResult.blob);
+        }
       }
-    } catch {}
+    }
   }
 
-  // Try all known URL patterns
-  const urls = [];
+  // APPROACH 2: Try GET with shipment ID
   if (shipmentId) {
-    urls.push(
+    const getUrls = [
       `https://www.vinted.pl/api/v2/shipments/${shipmentId}/label`,
       `https://www.vinted.pl/api/v2/shipments/${shipmentId}/parcel/label`,
-      `https://www.vinted.pl/api/v2/shipments/${shipmentId}/download`,
       `https://www.vinted.pl/api/v2/transactions/${txId}/shipments/${shipmentId}/label`,
-    );
+    ];
+    for (const url of getUrls) {
+      const result = await tryFetchPdf(url);
+      if (result.ok && result.blob) return await blobToBase64(result.blob);
+      if (result.ok && result.isJson && result.data) {
+        const str = JSON.stringify(result.data);
+        const urlMatch = str.match(/"(https?:[^"]*(?:label|pdf|download)[^"]*)"/i);
+        if (urlMatch) {
+          const pdfResult = await tryFetchPdf(urlMatch[1].replace(/\\\//g, '/'));
+          if (pdfResult.ok && pdfResult.blob) return await blobToBase64(pdfResult.blob);
+        }
+      }
+    }
   }
-  urls.push(
+
+  // APPROACH 3: Try GET with transaction ID
+  const txUrls = [
     `https://www.vinted.pl/api/v2/transactions/${txId}/shipment/label`,
     `https://www.vinted.pl/api/v2/transactions/${txId}/label`,
     `https://www.vinted.pl/api/v2/conversations/${convId}/shipment/label`,
-  );
-
-  for (const url of urls) {
-    try {
-      const resp = await fetch(url, {
-        credentials: 'include',
-        headers: { ...getAuthHeaders(), 'Accept': 'application/pdf, application/octet-stream, */*' }
-      });
-      if (resp.ok) {
-        const blob = await resp.blob();
-        if (blob.size > 100) return await blobToBase64(blob);
-      }
-    } catch {}
+  ];
+  for (const url of txUrls) {
+    const result = await tryFetchPdf(url);
+    if (result.ok && result.blob) return await blobToBase64(result.blob);
   }
 
-  return { error: `Label not found. Use Capture Mode to discover the download URL.` };
+  // APPROACH 4: Try POST to get label URL from shipment
+  const postPdfEndpoints = [
+    `https://www.vinted.pl/api/v2/transactions/${txId}/shipment/label`,
+    `https://www.vinted.pl/api/v2/transactions/${txId}/label`,
+    `https://www.vinted.pl/api/v2/shipments/${shipmentId}/label`,
+  ];
+  for (const url of postPdfEndpoints) {
+    const result = await tryFetchPdf(url, 'POST');
+    if (result.ok && result.blob) return await blobToBase64(result.blob);
+  }
+
+  return { error: `Label not found. Please use Capture Mode.` };
 }
 
 async function runDiagnostics() {
   const results = [];
 
-  // Get first order's transaction details - focus on available_actions and order fields
   const ordersResult = await tryFetchJson('https://www.vinted.pl/api/v2/my_orders?type=sold&page=1&per_page=5');
   if (!ordersResult.ok) {
     results.push({ type: 'error', msg: 'Cannot fetch orders' });
@@ -344,36 +376,73 @@ async function runDiagnostics() {
   const convId = order.conversation_id;
   results.push({ type: 'info', msg: `Order: tx=${txId} conv=${convId}` });
 
-  // Full transaction data
   const txResult = await tryFetchJson(`https://www.vinted.pl/api/v2/transactions/${txId}`);
   if (txResult.ok) {
     const tx = txResult.data.transaction || {};
-
-    // Show available_actions
     results.push({ type: 'info', msg: `available_actions: ${JSON.stringify(tx.available_actions)}` });
-    results.push({ type: 'info', msg: `order field: ${JSON.stringify(tx.order)}` });
 
-    // Show full transaction JSON (in chunks)
-    const fullTx = JSON.stringify(txResult.data);
-    for (let i = 0; i < Math.min(fullTx.length, 5000); i += 500) {
-      results.push({ type: 'info', msg: `TX[${i}]: ${fullTx.substring(i, i + 500)}` });
+    const shipmentId = tx.shipment?.id;
+    results.push({ type: 'info', msg: `Shipment ID: ${shipmentId}` });
+
+    // Try send_shipping_label via POST
+    results.push({ type: 'info', msg: `--- Trying POST endpoints ---` });
+    const postUrls = [
+      `/api/v2/transactions/${txId}/send_shipping_label`,
+      `/api/v2/transactions/${txId}/shipping_label`,
+      `/api/v2/transactions/${txId}/actions/send_shipping_label`,
+      `/api/v2/shipments/${shipmentId}/send_label`,
+      `/api/v2/shipments/${shipmentId}/label`,
+      `/api/v2/transactions/${txId}/shipment/label`,
+      `/api/v2/transactions/${txId}/label`,
+    ];
+
+    for (const path of postUrls) {
+      const url = `https://www.vinted.pl${path}`;
+      const result = await tryPostJson(url, null);
+      let detail = `POST ${path} -> HTTP ${result.status}`;
+      if (result.ok && result.data) {
+        detail += ` DATA: ${JSON.stringify(result.data).substring(0, 400)}`;
+      }
+      if (result.ok && result.isPdf) {
+        detail += ` [GOT PDF!]`;
+      }
+      if (result.text) {
+        detail += ` TEXT: ${result.text.substring(0, 100)}`;
+      }
+      if (result.error) {
+        detail += ` ERROR: ${result.error}`;
+      }
+      results.push({ type: result.ok ? 'success' : 'error', msg: detail });
+    }
+
+    // Also try GET with Accept: application/pdf
+    results.push({ type: 'info', msg: `--- Trying GET endpoints ---` });
+    const getUrls = [
+      `/api/v2/shipments/${shipmentId}/label`,
+      `/api/v2/transactions/${txId}/shipment/label`,
+    ];
+    for (const path of getUrls) {
+      const url = `https://www.vinted.pl${path}`;
+      const result = await tryFetchPdf(url);
+      let detail = `GET ${path} -> ${result.ok ? 'OK' : 'FAIL'} ${result.status || ''}`;
+      if (result.blob) detail += ` [GOT PDF! size=${result.blob.size}]`;
+      if (result.isJson) detail += ` JSON: ${JSON.stringify(result.data).substring(0, 300)}`;
+      results.push({ type: result.ok && result.blob ? 'success' : 'error', msg: detail });
     }
   }
 
-  // Check captured requests
+  // Show captured requests
   if (window.__vintedCaptured && window.__vintedCaptured.length > 0) {
-    results.push({ type: 'success', msg: `Captured ${window.__vintedCaptured.length} requests` });
+    results.push({ type: 'info', msg: `--- Captured requests: ${window.__vintedCaptured.length} ---` });
     for (const c of window.__vintedCaptured) {
-      results.push({ type: c.isPdf ? 'success' : 'info', msg: `Captured: ${c.method || ''} ${c.url || c.text || ''} -> ${c.status || ''} (${c.contentType || c.type || ''})` });
+      let detail = `[${c.type}] `;
+      if (c.url) detail += `${c.method || ''} ${c.url} -> ${c.status || ''} (${c.contentType || ''})`;
+      if (c.text) detail += ` "${c.text}"`;
+      if (c.href) detail += ` href="${c.href}"`;
+      if (c.blobType) detail += ` blob: ${c.blobType} (${c.blobSize} bytes)`;
+      if (c.isPdf) detail += ' [PDF!]';
+      results.push({ type: c.isPdf ? 'success' : 'info', msg: detail });
     }
-  }
-
-  // Find buttons on the page
-  const btnResult = await findLabelButton();
-  results.push({ type: 'info', msg: `Found ${btnResult.buttons.length} label-related elements (${btnResult.totalClickable} total clickable)` });
-  for (const btn of btnResult.buttons.slice(0, 10)) {
-    results.push({ type: 'success', msg: `Button: <${btn.tag}> "${btn.text}" href="${btn.href}" class="${btn.className}" ${btn.dataTestId ? 'testid=' + btn.dataTestId : ''} ${btn.attr || ''}` });
-    results.push({ type: 'info', msg: `  HTML: ${btn.outerHTML}` });
   }
 
   return results;
