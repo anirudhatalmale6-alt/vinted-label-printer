@@ -15,18 +15,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-function getAuthHeaders() {
-  const csrf = getCsrfToken();
-  const headers = {
-    'Accept': 'application/json, text/plain, */*',
-    'X-Requested-With': 'XMLHttpRequest',
-  };
-  if (csrf) {
-    headers['X-CSRF-Token'] = csrf;
-  }
-  return headers;
-}
-
 function getCsrfToken() {
   const meta = document.querySelector('meta[name="csrf-token"]');
   if (meta) return meta.getAttribute('content');
@@ -37,6 +25,16 @@ function getCsrfToken() {
     if (match) return match[1];
   }
   return null;
+}
+
+function getAuthHeaders() {
+  const csrf = getCsrfToken();
+  const headers = {
+    'Accept': 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+  };
+  if (csrf) headers['X-CSRF-Token'] = csrf;
+  return headers;
 }
 
 async function tryFetchJson(url) {
@@ -54,17 +52,22 @@ async function tryFetchPdf(url) {
   try {
     const resp = await fetch(url, {
       credentials: 'include',
-      headers: { ...getAuthHeaders(), 'Accept': 'application/pdf, */*' }
+      headers: { ...getAuthHeaders(), 'Accept': 'application/pdf, application/octet-stream, */*' }
     });
     if (!resp.ok) return { ok: false, status: resp.status };
     const ct = resp.headers.get('content-type') || '';
     if (ct.includes('pdf') || ct.includes('octet-stream')) {
       const blob = await resp.blob();
-      return { ok: true, blob };
+      return { ok: true, blob, contentType: ct };
     }
     if (ct.includes('json')) {
       const data = await resp.json();
-      return { ok: true, isJson: true, data };
+      return { ok: true, isJson: true, data, contentType: ct };
+    }
+    // Might be PDF without proper content-type
+    const blob = await resp.blob();
+    if (blob.size > 500) {
+      return { ok: true, blob, contentType: ct };
     }
     return { ok: false, status: resp.status, contentType: ct };
   } catch (err) {
@@ -76,7 +79,7 @@ async function blobToBase64(blob) {
   return new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = () => resolve({ pdfBase64: reader.result.split(',')[1] });
-    reader.onerror = () => resolve({ error: 'Failed to read PDF' });
+    reader.onerror = () => resolve({ error: 'Failed to read blob' });
     reader.readAsDataURL(blob);
   });
 }
@@ -92,10 +95,24 @@ async function fetchSoldOrders() {
     const items = result.data.my_orders || [];
 
     for (const item of items) {
+      const txId = String(item.transaction_id || '');
+      const convId = String(item.conversation_id || '');
+      const title = item.title || '';
+
+      if (!title || !txId) continue;
+
+      // Fetch transaction details to get the SHIPMENT ID
+      let shipmentId = null;
+      const txResult = await tryFetchJson(`https://www.vinted.pl/api/v2/transactions/${txId}`);
+      if (txResult.ok && txResult.data?.transaction?.shipment) {
+        shipmentId = String(txResult.data.transaction.shipment.id || '');
+      }
+
       orders.push({
-        title: item.title || '',
-        transactionId: String(item.transaction_id || ''),
-        conversationId: String(item.conversation_id || ''),
+        title,
+        transactionId: txId,
+        conversationId: convId,
+        shipmentId: shipmentId,
         status: (item.status || '').toLowerCase(),
         date: item.date || '',
       });
@@ -110,167 +127,119 @@ async function fetchSoldOrders() {
 async function downloadLabel(order) {
   const txId = order.transactionId;
   const convId = order.conversationId;
+  let shipmentId = order.shipmentId;
 
-  // APPROACH 1: Fetch the conversation page HTML and find the label download link
-  try {
-    const pageResp = await fetch(`https://www.vinted.pl/inbox/${convId}`, {
-      credentials: 'include',
-      headers: { 'Accept': 'text/html, */*' }
-    });
-    if (pageResp.ok) {
-      const html = await pageResp.text();
-
-      // Look for label/shipment download links in the HTML
-      const patterns = [
-        /href=["'](\/api\/v2\/[^"']*label[^"']*)["']/gi,
-        /href=["'](\/api\/v2\/[^"']*shipment[^"']*)["']/gi,
-        /href=["']([^"']*shipping[_-]?label[^"']*)["']/gi,
-        /href=["']([^"']*etykiet[^"']*)["']/gi,
-        /href=["']([^"']*parcel[^"']*)["']/gi,
-        /"(https?:\/\/[^"]*label[^"]*\.pdf[^"]*)"/gi,
-        /"(https?:\/\/[^"]*shipment[^"]*download[^"]*)"/gi,
-        /"(\/[^"]*label[^"]*download[^"]*)"/gi,
-        /data-url=["']([^"']*label[^"']*)["']/gi,
-        /action=["']([^"']*label[^"']*)["']/gi,
-      ];
-
-      const foundUrls = new Set();
-      for (const pattern of patterns) {
-        let match;
-        while ((match = pattern.exec(html)) !== null) {
-          foundUrls.add(match[1]);
-        }
-      }
-
-      // Also look for any URL in __NEXT_DATA__ or inline script data
-      const scriptDataMatch = html.match(/__NEXT_DATA__[^>]*>(.*?)<\/script>/s);
-      if (scriptDataMatch) {
-        const scriptData = scriptDataMatch[1];
-        // Find label-related URLs in the JSON data
-        const urlMatches = scriptData.match(/"(https?:\/\/[^"]*(?:label|shipment|parcel)[^"]*)"/gi);
-        if (urlMatches) {
-          urlMatches.forEach(m => foundUrls.add(m.replace(/"/g, '')));
-        }
-        // Also look for label_url, parcel_label_url etc.
-        const fieldMatches = scriptData.match(/"(?:label_url|parcel_label_url|shipping_label_url|shipment_label_url|download_url)"\s*:\s*"([^"]+)"/gi);
-        if (fieldMatches) {
-          fieldMatches.forEach(m => {
-            const val = m.match(/"([^"]+)"\s*$/);
-            if (val) foundUrls.add(val[1].replace(/\\\//g, '/'));
-          });
-        }
-      }
-
-      // Try each found URL
-      for (const url of foundUrls) {
-        const fullUrl = url.startsWith('http') ? url : `https://www.vinted.pl${url}`;
-        const pdfResult = await tryFetchPdf(fullUrl);
-        if (pdfResult.ok && pdfResult.blob) {
-          return await blobToBase64(pdfResult.blob);
-        }
-        if (pdfResult.ok && pdfResult.isJson && pdfResult.data) {
-          const dataStr = JSON.stringify(pdfResult.data);
-          const pdfUrlMatch = dataStr.match(/"(https?:[^"]*\.pdf[^"]*)"/);
-          if (pdfUrlMatch) {
-            const pdfUrl = pdfUrlMatch[1].replace(/\\\//g, '/');
-            const pdfResp = await fetch(pdfUrl, { credentials: 'include' });
-            if (pdfResp.ok) {
-              const blob = await pdfResp.blob();
-              return await blobToBase64(blob);
-            }
-          }
-        }
-      }
-    }
-  } catch {}
-
-  // APPROACH 2: Fetch conversation API data and look for label info
-  try {
-    const convResult = await tryFetchJson(`https://www.vinted.pl/api/v2/conversations/${convId}`);
-    if (convResult.ok && convResult.data) {
-      const dataStr = JSON.stringify(convResult.data);
-
-      // Search for any URL that looks like a label download
-      const urlPatterns = [
-        /"(https?:[^"]*(?:label|parcel|shipment)[^"]*(?:download|pdf)[^"]*)"/gi,
-        /"(?:label_url|parcel_label_url|shipping_label_url|download_url|url)"\s*:\s*"(https?:[^"]+)"/gi,
-        /"(https?:[^"]*\.pdf[^"]*)"/gi,
-        /"(\/api\/v2\/[^"]*(?:label|parcel)[^"]*)"/gi,
-      ];
-
-      const urls = new Set();
-      for (const pat of urlPatterns) {
-        let m;
-        while ((m = pat.exec(dataStr)) !== null) {
-          urls.add((m[1] || m[2]).replace(/\\\//g, '/'));
-        }
-      }
-
-      for (const url of urls) {
-        const fullUrl = url.startsWith('http') ? url : `https://www.vinted.pl${url}`;
-        const pdfResult = await tryFetchPdf(fullUrl);
-        if (pdfResult.ok && pdfResult.blob) {
-          return await blobToBase64(pdfResult.blob);
-        }
-      }
-
-      // Look for shipment object with nested data
-      const findShipment = (obj, depth = 0) => {
-        if (!obj || depth > 5) return null;
-        if (typeof obj !== 'object') return null;
-        if (obj.label_url) return obj.label_url;
-        if (obj.parcel_label_url) return obj.parcel_label_url;
-        if (obj.shipping_label_url) return obj.shipping_label_url;
-        for (const key of Object.keys(obj)) {
-          const found = findShipment(obj[key], depth + 1);
-          if (found) return found;
-        }
-        return null;
-      };
-
-      const labelUrl = findShipment(convResult.data);
-      if (labelUrl) {
-        const fullUrl = labelUrl.startsWith('http') ? labelUrl : `https://www.vinted.pl${labelUrl}`;
-        const pdfResult = await tryFetchPdf(fullUrl);
-        if (pdfResult.ok && pdfResult.blob) {
-          return await blobToBase64(pdfResult.blob);
-        }
-      }
-    }
-  } catch {}
-
-  // APPROACH 3: Try transaction API
-  try {
+  // If we don't have shipment ID, fetch it from transaction details
+  if (!shipmentId) {
     const txResult = await tryFetchJson(`https://www.vinted.pl/api/v2/transactions/${txId}`);
-    if (txResult.ok && txResult.data) {
-      const dataStr = JSON.stringify(txResult.data);
-      const urlMatch = dataStr.match(/"(https?:[^"]*(?:label|parcel|shipment)[^"]*)"/i);
-      if (urlMatch) {
-        const fullUrl = urlMatch[1].replace(/\\\//g, '/');
-        const pdfResult = await tryFetchPdf(fullUrl);
-        if (pdfResult.ok && pdfResult.blob) {
-          return await blobToBase64(pdfResult.blob);
-        }
-      }
+    if (txResult.ok && txResult.data?.transaction?.shipment) {
+      shipmentId = String(txResult.data.transaction.shipment.id || '');
     }
-  } catch {}
+  }
 
-  // APPROACH 4: Direct URL patterns as last resort
-  const directUrls = [
+  // Build list of URLs to try - prioritize shipment ID based URLs
+  const urls = [];
+
+  if (shipmentId) {
+    urls.push(
+      `https://www.vinted.pl/api/v2/shipments/${shipmentId}/label`,
+      `https://www.vinted.pl/api/v2/shipments/${shipmentId}/parcel/label`,
+      `https://www.vinted.pl/api/v2/shipments/${shipmentId}/download`,
+      `https://www.vinted.pl/api/v2/shipments/${shipmentId}/label/download`,
+      `https://www.vinted.pl/api/v2/transactions/${txId}/shipments/${shipmentId}/label`,
+      `https://www.vinted.pl/api/v2/transactions/${txId}/shipment/${shipmentId}/label`,
+    );
+  }
+
+  urls.push(
     `https://www.vinted.pl/api/v2/transactions/${txId}/shipment/label`,
     `https://www.vinted.pl/api/v2/transactions/${txId}/label`,
-    `https://www.vinted.pl/api/v2/shipments/${txId}/label`,
+    `https://www.vinted.pl/api/v2/transactions/${txId}/shipment/label/download`,
     `https://www.vinted.pl/api/v2/conversations/${convId}/shipment/label`,
-  ];
+    `https://www.vinted.pl/api/v2/conversations/${convId}/label`,
+  );
 
-  for (const url of directUrls) {
+  for (const url of urls) {
     const result = await tryFetchPdf(url);
     if (result.ok && result.blob) {
       return await blobToBase64(result.blob);
     }
+    // If JSON response, look for a URL inside
+    if (result.ok && result.isJson && result.data) {
+      const labelUrl = findUrlInData(result.data);
+      if (labelUrl) {
+        const pdfResult = await tryFetchPdf(labelUrl);
+        if (pdfResult.ok && pdfResult.blob) {
+          return await blobToBase64(pdfResult.blob);
+        }
+      }
+    }
   }
 
-  return { error: 'Could not find label download URL. Run diagnostics.' };
+  // APPROACH 2: Get full transaction data and search for ANY URL
+  const txResult = await tryFetchJson(`https://www.vinted.pl/api/v2/transactions/${txId}`);
+  if (txResult.ok && txResult.data) {
+    const allUrls = extractAllUrls(txResult.data);
+    for (const url of allUrls) {
+      if (url.includes('label') || url.includes('parcel') || url.includes('pdf') || url.includes('download') || url.includes('shipment')) {
+        const pdfResult = await tryFetchPdf(url);
+        if (pdfResult.ok && pdfResult.blob) {
+          return await blobToBase64(pdfResult.blob);
+        }
+      }
+    }
+  }
+
+  // APPROACH 3: Get conversation data and search
+  const convResult = await tryFetchJson(`https://www.vinted.pl/api/v2/conversations/${convId}`);
+  if (convResult.ok && convResult.data) {
+    const allUrls = extractAllUrls(convResult.data);
+    for (const url of allUrls) {
+      if (url.includes('label') || url.includes('parcel') || url.includes('pdf') || url.includes('download')) {
+        const pdfResult = await tryFetchPdf(url);
+        if (pdfResult.ok && pdfResult.blob) {
+          return await blobToBase64(pdfResult.blob);
+        }
+      }
+    }
+  }
+
+  return {
+    error: `Label not found. Transaction: ${txId}, Shipment: ${shipmentId || 'unknown'}`,
+    shipmentId
+  };
+}
+
+function findUrlInData(data) {
+  const str = JSON.stringify(data);
+  const patterns = [
+    /"(?:label_url|parcel_label_url|shipping_label_url|download_url|url)"\s*:\s*"(https?:[^"]+)"/i,
+    /"(https?:[^"]*(?:label|parcel)[^"]*\.pdf[^"]*)"/i,
+    /"(https?:[^"]*(?:label|parcel)[^"]*download[^"]*)"/i,
+  ];
+  for (const p of patterns) {
+    const m = str.match(p);
+    if (m) return m[1].replace(/\\\//g, '/');
+  }
+  return null;
+}
+
+function extractAllUrls(obj) {
+  const urls = new Set();
+  const str = JSON.stringify(obj);
+  const matches = str.match(/"(https?:\/\/[^"]+)"/g);
+  if (matches) {
+    for (const m of matches) {
+      urls.add(m.slice(1, -1).replace(/\\\//g, '/'));
+    }
+  }
+  const pathMatches = str.match(/"(\/api\/v2\/[^"]+)"/g);
+  if (pathMatches) {
+    for (const m of pathMatches) {
+      urls.add('https://www.vinted.pl' + m.slice(1, -1).replace(/\\\//g, '/'));
+    }
+  }
+  return [...urls];
 }
 
 async function runDiagnostics() {
@@ -288,140 +257,175 @@ async function runDiagnostics() {
 
   const orders = ordersResult.data.my_orders || [];
   results.push({ type: 'success', msg: `Found ${orders.length} orders` });
-
   if (orders.length === 0) return results;
 
   const order = orders[0];
-  results.push({ type: 'info', msg: `First order: ${JSON.stringify(order)}` });
-
-  const convId = order.conversation_id;
   const txId = order.transaction_id;
+  const convId = order.conversation_id;
+  results.push({ type: 'info', msg: `Order: tx=${txId} conv=${convId} title="${order.title}"` });
 
-  // Fetch conversation API
-  results.push({ type: 'info', msg: `--- Checking conversation ${convId} ---` });
-  const convResult = await tryFetchJson(`https://www.vinted.pl/api/v2/conversations/${convId}`);
-  if (convResult.ok) {
-    results.push({ type: 'success', msg: `Conversation API: HTTP 200` });
-    results.push({ type: 'info', msg: `Conv keys: ${Object.keys(convResult.data).join(', ')}` });
-    const fullJson = JSON.stringify(convResult.data);
-    // Split into chunks for display
-    for (let i = 0; i < Math.min(fullJson.length, 3000); i += 500) {
-      results.push({ type: 'info', msg: `ConvData[${i}]: ${fullJson.substring(i, i + 500)}` });
-    }
-  } else {
-    results.push({ type: 'error', msg: `Conversation API: HTTP ${convResult.status}` });
-  }
-
-  // Fetch transaction API
-  results.push({ type: 'info', msg: `--- Checking transaction ${txId} ---` });
+  // Get full transaction details including shipment
+  results.push({ type: 'info', msg: `--- Transaction details ---` });
   const txResult = await tryFetchJson(`https://www.vinted.pl/api/v2/transactions/${txId}`);
-  if (txResult.ok) {
-    results.push({ type: 'success', msg: `Transaction API: HTTP 200` });
-    const txJson = JSON.stringify(txResult.data);
-    for (let i = 0; i < Math.min(txJson.length, 3000); i += 500) {
-      results.push({ type: 'info', msg: `TxData[${i}]: ${txJson.substring(i, i + 500)}` });
+  if (txResult.ok && txResult.data) {
+    const tx = txResult.data.transaction || {};
+    const shipment = tx.shipment || {};
+    const shipmentId = shipment.id;
+    results.push({ type: 'success', msg: `Transaction: HTTP 200` });
+    results.push({ type: 'info', msg: `Shipment ID: ${shipmentId}` });
+    results.push({ type: 'info', msg: `Shipment status: ${shipment.status} - ${shipment.status_title}` });
+    results.push({ type: 'info', msg: `Shipment ALL keys: ${Object.keys(shipment).join(', ')}` });
+    results.push({ type: 'info', msg: `Shipment FULL: ${JSON.stringify(shipment)}` });
+    results.push({ type: 'info', msg: `Transaction ALL keys: ${Object.keys(tx).join(', ')}` });
+
+    // Show ALL URLs found in transaction data
+    const allUrls = extractAllUrls(txResult.data);
+    results.push({ type: 'info', msg: `URLs found in transaction data: ${allUrls.length}` });
+    for (const url of allUrls) {
+      results.push({ type: 'info', msg: `  URL: ${url}` });
+    }
+
+    // Try label URLs with SHIPMENT ID
+    if (shipmentId) {
+      results.push({ type: 'info', msg: `--- Trying label URLs with shipment ID ${shipmentId} ---` });
+      const shipmentLabelUrls = [
+        `/api/v2/shipments/${shipmentId}/label`,
+        `/api/v2/shipments/${shipmentId}/parcel/label`,
+        `/api/v2/shipments/${shipmentId}/download`,
+        `/api/v2/shipments/${shipmentId}/label/download`,
+        `/api/v2/transactions/${txId}/shipments/${shipmentId}/label`,
+        `/api/v2/transactions/${txId}/shipment/${shipmentId}/label`,
+      ];
+
+      for (const path of shipmentLabelUrls) {
+        const url = `https://www.vinted.pl${path}`;
+        try {
+          const resp = await fetch(url, {
+            credentials: 'include',
+            headers: { ...getAuthHeaders(), 'Accept': 'application/pdf, application/octet-stream, */*' }
+          });
+          const ct = resp.headers.get('content-type') || '';
+          const size = resp.headers.get('content-length') || '?';
+          let detail = `${path} -> HTTP ${resp.status} (${ct}, size: ${size})`;
+          if (resp.ok && ct.includes('json')) {
+            const data = await resp.json();
+            detail += ` DATA: ${JSON.stringify(data).substring(0, 300)}`;
+          }
+          results.push({ type: resp.ok ? 'success' : 'error', msg: detail });
+        } catch (err) {
+          results.push({ type: 'error', msg: `${path} -> Error: ${err.message}` });
+        }
+      }
+    }
+
+    // Also try with transaction ID
+    results.push({ type: 'info', msg: `--- Trying label URLs with transaction ID ${txId} ---` });
+    const txLabelUrls = [
+      `/api/v2/transactions/${txId}/shipment/label`,
+      `/api/v2/transactions/${txId}/label`,
+      `/api/v2/transactions/${txId}/shipment/label/download`,
+    ];
+
+    for (const path of txLabelUrls) {
+      const url = `https://www.vinted.pl${path}`;
+      try {
+        const resp = await fetch(url, {
+          credentials: 'include',
+          headers: { ...getAuthHeaders(), 'Accept': 'application/pdf, application/octet-stream, */*' }
+        });
+        const ct = resp.headers.get('content-type') || '';
+        let detail = `${path} -> HTTP ${resp.status} (${ct})`;
+        if (resp.ok && ct.includes('json')) {
+          const data = await resp.json();
+          detail += ` DATA: ${JSON.stringify(data).substring(0, 300)}`;
+        }
+        results.push({ type: resp.ok ? 'success' : 'error', msg: detail });
+      } catch (err) {
+        results.push({ type: 'error', msg: `${path} -> Error: ${err.message}` });
+      }
     }
   } else {
     results.push({ type: 'error', msg: `Transaction API: HTTP ${txResult.status}` });
   }
 
-  // Fetch conversation page HTML and look for label links
-  results.push({ type: 'info', msg: `--- Checking conversation page HTML ---` });
+  // Conversation data
+  results.push({ type: 'info', msg: `--- Conversation details ---` });
+  const convResult = await tryFetchJson(`https://www.vinted.pl/api/v2/conversations/${convId}`);
+  if (convResult.ok && convResult.data) {
+    const conv = convResult.data.conversation || {};
+    results.push({ type: 'success', msg: `Conversation: HTTP 200` });
+    results.push({ type: 'info', msg: `Conv keys: ${Object.keys(conv).join(', ')}` });
+
+    // Look for any label/shipment related fields
+    const convStr = JSON.stringify(convResult.data);
+    const labelMatches = convStr.match(/"[^"]*(?:label|parcel|shipment|tracking|download)[^"]*"\s*:\s*"?[^",}]+/gi);
+    if (labelMatches) {
+      for (const lm of labelMatches.slice(0, 10)) {
+        results.push({ type: 'info', msg: `Conv match: ${lm}` });
+      }
+    }
+  }
+
+  // Check conversation page HTML for download buttons
+  results.push({ type: 'info', msg: `--- Conversation page HTML scan ---` });
   try {
     const pageResp = await fetch(`https://www.vinted.pl/inbox/${convId}`, {
-      credentials: 'include',
-      headers: { 'Accept': 'text/html' }
+      credentials: 'include'
     });
     if (pageResp.ok) {
       const html = await pageResp.text();
-      results.push({ type: 'success', msg: `Conversation page: loaded (${html.length} chars)` });
+      results.push({ type: 'success', msg: `Page loaded (${html.length} chars)` });
 
-      // Look for label-related elements
-      const labelKeywords = ['label', 'etykiet', 'shipment', 'parcel', 'przesylk', 'nadaj', 'paczk'];
-      for (const kw of labelKeywords) {
-        const regex = new RegExp(`[^\\n]{0,100}${kw}[^\\n]{0,100}`, 'gi');
-        const matches = html.match(regex);
-        if (matches) {
-          for (const m of matches.slice(0, 3)) {
-            results.push({ type: 'info', msg: `HTML match [${kw}]: ${m.trim().substring(0, 200)}` });
-          }
+      // Find any href containing relevant keywords
+      const hrefMatches = html.match(/href=["'][^"']*(?:label|shipment|parcel|download|etykiet|pobierz)[^"']*["']/gi);
+      if (hrefMatches) {
+        for (const hm of hrefMatches) {
+          results.push({ type: 'success', msg: `Found href: ${hm}` });
+        }
+      } else {
+        results.push({ type: 'info', msg: 'No label/download hrefs found in page HTML' });
+      }
+
+      // Find data attributes
+      const dataMatches = html.match(/data-[^=]*=["'][^"']*(?:label|shipment|download)[^"']*["']/gi);
+      if (dataMatches) {
+        for (const dm of dataMatches) {
+          results.push({ type: 'success', msg: `Found data attr: ${dm}` });
         }
       }
 
-      // Extract __NEXT_DATA__ if present
-      const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s);
-      if (nextDataMatch) {
-        results.push({ type: 'info', msg: `Found __NEXT_DATA__ (${nextDataMatch[1].length} chars)` });
-        // Search for shipment/label data in NEXT_DATA
-        const nd = nextDataMatch[1];
-        const shipmentMatch = nd.match(/"shipment"\s*:\s*\{[^}]*\}/g);
-        if (shipmentMatch) {
-          for (const sm of shipmentMatch) {
-            results.push({ type: 'info', msg: `NEXT_DATA shipment: ${sm.substring(0, 300)}` });
-          }
-        }
-        // Look for any URL with label/parcel
-        const urlMatches = nd.match(/"[^"]*(?:label|parcel|shipment)[^"]*url[^"]*"\s*:\s*"[^"]+"/gi);
-        if (urlMatches) {
-          for (const um of urlMatches) {
-            results.push({ type: 'success', msg: `NEXT_DATA URL: ${um}` });
-          }
+      // Look for inline scripts with label data
+      const scriptBlocks = html.match(/<script[^>]*>([^<]*(?:label|shipment|parcel)[^<]*)<\/script>/gi);
+      if (scriptBlocks) {
+        for (const sb of scriptBlocks.slice(0, 3)) {
+          results.push({ type: 'info', msg: `Script with label ref: ${sb.substring(0, 200)}` });
         }
       }
 
-      // Also look for any link containing download/label
-      const linkMatches = html.match(/<a[^>]*(?:label|etykiet|download|pobierz)[^>]*>/gi);
-      if (linkMatches) {
-        for (const lm of linkMatches.slice(0, 5)) {
-          results.push({ type: 'success', msg: `Download link: ${lm}` });
+      // Check __NEXT_DATA__
+      const nextData = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+      if (nextData) {
+        results.push({ type: 'info', msg: `Has __NEXT_DATA__ (${nextData[1].length} chars)` });
+        const nd = nextData[1];
+        // Look for shipment/label in NEXT_DATA
+        const shipmentRefs = nd.match(/"shipment[^"]*":\s*(?:\{[^}]*\}|"[^"]*")/g);
+        if (shipmentRefs) {
+          for (const sr of shipmentRefs.slice(0, 5)) {
+            results.push({ type: 'info', msg: `NEXT_DATA: ${sr.substring(0, 200)}` });
+          }
         }
-      }
-
-      // Check for buttons with label text
-      const btnMatches = html.match(/<button[^>]*>(?:[^<]*(?:label|etykiet|pobierz|download)[^<]*)<\/button>/gi);
-      if (btnMatches) {
-        for (const bm of btnMatches.slice(0, 3)) {
-          results.push({ type: 'success', msg: `Download button: ${bm}` });
+        const labelRefs = nd.match(/"[^"]*label[^"]*":\s*(?:\{[^}]*\}|"[^"]*"|true|false)/gi);
+        if (labelRefs) {
+          for (const lr of labelRefs.slice(0, 5)) {
+            results.push({ type: 'info', msg: `NEXT_DATA label: ${lr.substring(0, 200)}` });
+          }
         }
+      } else {
+        results.push({ type: 'info', msg: 'No __NEXT_DATA__ found' });
       }
     }
   } catch (err) {
-    results.push({ type: 'error', msg: `Page fetch error: ${err.message}` });
-  }
-
-  // Try direct label URL patterns
-  results.push({ type: 'info', msg: `--- Trying label URLs ---` });
-  const labelUrls = [
-    `/api/v2/transactions/${txId}/shipment/label`,
-    `/api/v2/transactions/${txId}/label`,
-    `/api/v2/transactions/${txId}/shipment`,
-    `/api/v2/shipments/${txId}/label`,
-    `/api/v2/conversations/${convId}/shipment/label`,
-    `/api/v2/conversations/${convId}/label`,
-    `/api/v2/my_orders/${txId}/label`,
-    `/api/v2/my_orders/${txId}/shipment/label`,
-    `/member/transaction/${txId}/label`,
-  ];
-
-  for (const path of labelUrls) {
-    const url = `https://www.vinted.pl${path}`;
-    try {
-      const resp = await fetch(url, {
-        credentials: 'include',
-        headers: { ...getAuthHeaders(), 'Accept': 'application/pdf, application/json, */*' }
-      });
-      const ct = resp.headers.get('content-type') || '';
-      results.push({
-        type: resp.ok ? 'success' : 'error',
-        msg: `${path} -> HTTP ${resp.status} (${ct})`
-      });
-      if (resp.ok && ct.includes('json')) {
-        const data = await resp.json();
-        results.push({ type: 'info', msg: `  Response: ${JSON.stringify(data).substring(0, 300)}` });
-      }
-    } catch (err) {
-      results.push({ type: 'error', msg: `${path} -> Error: ${err.message}` });
-    }
+    results.push({ type: 'error', msg: `Page error: ${err.message}` });
   }
 
   return results;
