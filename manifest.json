@@ -8,10 +8,16 @@
     "downloads",
     "activeTab",
     "scripting",
-    "webRequest"
+    "webRequest",
+    "webNavigation"
   ],
   "host_permissions": [
-    "https://www.vinted.pl/*"
+    "https://www.vinted.pl/*",
+    "https://*.vinted.net/*",
+    "https://*.vinted.com/*",
+    "https://*.vinted.lt/*",
+    "https://*.vinted.fr/*",
+    "https://*.vinted.de/*"
   ],
   "background": {
     "service_worker": "background.js"

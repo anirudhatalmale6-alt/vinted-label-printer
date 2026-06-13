@@ -1,105 +1,121 @@
-// Monitor ALL web requests to vinted.pl for PDF responses
+// Monitor ALL web requests for PDFs (any URL - label might come from a CDN or carrier)
 chrome.webRequest.onCompleted.addListener(
   (details) => {
+    const url = details.url;
+
+    // Skip static assets
+    if (url.match(/\.(jpeg|jpg|png|gif|svg|css|woff|woff2|ttf|ico)(\?|$)/i)) return;
+    if (url.includes('images1.vinted.net')) return;
+    if (url.includes('google') || url.includes('facebook') || url.includes('analytics')) return;
+
     const ct = (details.responseHeaders || []).find(
       h => h.name.toLowerCase() === 'content-type'
     );
     const contentType = ct ? ct.value : '';
-    const url = details.url;
+    const contentDisp = (details.responseHeaders || []).find(
+      h => h.name.toLowerCase() === 'content-disposition'
+    );
+    const disposition = contentDisp ? contentDisp.value : '';
 
-    // Log everything from vinted.pl API for debugging
-    if (url.includes('/api/') && !url.includes('images1.vinted.net')) {
+    const isPdf = contentType.includes('pdf') ||
+                  contentType.includes('octet-stream') ||
+                  disposition.includes('.pdf') ||
+                  url.includes('.pdf');
+
+    const isVinted = url.includes('vinted');
+    const isLabelRelated = url.includes('label') || url.includes('shipment') ||
+                           url.includes('parcel') || url.includes('shipping');
+
+    // Store everything that's relevant
+    if (isVinted || isPdf || isLabelRelated) {
       const entry = {
         url,
         method: details.method,
         status: details.statusCode,
         contentType,
+        disposition,
+        tabId: details.tabId,
         type: details.type,
+        isPdf,
         time: Date.now(),
       };
 
-      // Store in captured requests
       chrome.storage.local.get('capturedRequests', (data) => {
         const requests = data.capturedRequests || [];
         requests.push(entry);
-        // Keep only last 100
-        if (requests.length > 100) requests.splice(0, requests.length - 100);
+        if (requests.length > 200) requests.splice(0, requests.length - 200);
         chrome.storage.local.set({ capturedRequests: requests });
       });
 
-      // If it's a PDF, this is likely the label URL!
-      if (contentType.includes('pdf') || contentType.includes('octet-stream')) {
-        console.log('[Vinted Label] FOUND PDF URL:', url);
+      if (isPdf) {
+        console.log('[Vinted Label] FOUND PDF:', url, contentType, disposition);
         chrome.storage.local.set({
           foundLabelUrl: url,
           foundLabelTime: Date.now(),
+          foundLabelContentType: contentType,
+          foundLabelDisposition: disposition,
         });
-        // Set badge to notify user
         chrome.action.setBadgeText({ text: 'PDF!' });
         chrome.action.setBadgeBackgroundColor({ color: '#27ae60' });
       }
     }
   },
-  { urls: ['https://www.vinted.pl/*'] },
+  { urls: ['<all_urls>'] },
   ['responseHeaders']
 );
 
-// Also monitor downloads
+// Monitor downloads (catches file saves)
 chrome.downloads.onCreated.addListener((item) => {
-  if (item.url && item.url.includes('vinted')) {
+  const entry = {
+    url: item.url || '',
+    finalUrl: item.finalUrl || '',
+    filename: item.filename || '',
+    mime: item.mime || '',
+    type: 'download-created',
+    fileSize: item.fileSize,
+    state: item.state,
+    time: Date.now(),
+  };
+
+  chrome.storage.local.get('capturedRequests', (data) => {
+    const requests = data.capturedRequests || [];
+    requests.push(entry);
+    chrome.storage.local.set({ capturedRequests: requests });
+  });
+
+  console.log('[Vinted Label] Download created:', item.url, item.mime, item.filename);
+
+  if (item.mime && (item.mime.includes('pdf') || item.mime.includes('octet'))) {
+    chrome.storage.local.set({
+      foundLabelUrl: item.url,
+      foundLabelTime: Date.now(),
+    });
+    chrome.action.setBadgeText({ text: 'PDF!' });
+    chrome.action.setBadgeBackgroundColor({ color: '#27ae60' });
+  }
+});
+
+// Monitor tab navigations (catches new tab openings for PDFs)
+chrome.webNavigation?.onCompleted?.addListener((details) => {
+  if (details.url && (details.url.includes('label') || details.url.includes('shipment') ||
+      details.url.includes('.pdf') || details.url.includes('parcel'))) {
     const entry = {
-      url: item.url,
-      filename: item.filename,
-      mime: item.mime,
-      type: 'download',
+      url: details.url,
+      type: 'navigation',
+      tabId: details.tabId,
       time: Date.now(),
     };
-
     chrome.storage.local.get('capturedRequests', (data) => {
       const requests = data.capturedRequests || [];
       requests.push(entry);
       chrome.storage.local.set({ capturedRequests: requests });
     });
-
-    if (item.mime && (item.mime.includes('pdf') || item.mime.includes('octet-stream'))) {
-      console.log('[Vinted Label] PDF DOWNLOAD:', item.url);
-      chrome.storage.local.set({
-        foundLabelUrl: item.url,
-        foundLabelTime: Date.now(),
-      });
-      chrome.action.setBadgeText({ text: 'PDF!' });
-      chrome.action.setBadgeBackgroundColor({ color: '#27ae60' });
-    }
   }
 });
 
-// Monitor navigation to find label-related URLs
-chrome.webRequest.onCompleted.addListener(
-  (details) => {
-    if (details.url.includes('label') || details.url.includes('shipment') || details.url.includes('parcel')) {
-      const entry = {
-        url: details.url,
-        method: details.method,
-        status: details.statusCode,
-        type: 'navigation-label-related',
-        time: Date.now(),
-      };
-      chrome.storage.local.get('capturedRequests', (data) => {
-        const requests = data.capturedRequests || [];
-        requests.push(entry);
-        chrome.storage.local.set({ capturedRequests: requests });
-      });
-    }
-  },
-  { urls: ['https://www.vinted.pl/*', 'https://*.vinted.net/*', 'https://*.vinted.com/*'] }
-);
-
 chrome.commands.onCommand.addListener(async (command) => {
   if (command === 'scan-labels') {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab && tab.url && tab.url.includes('vinted.pl')) {
-      chrome.action.openPopup();
-    }
+    chrome.action.openPopup();
   }
 });
 
@@ -129,9 +145,5 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.storage.local.get('collectedLabels', (data) => {
-    if (!data.collectedLabels) {
-      chrome.storage.local.set({ collectedLabels: [], capturedRequests: [] });
-    }
-  });
+  chrome.storage.local.set({ collectedLabels: [], capturedRequests: [] });
 });
