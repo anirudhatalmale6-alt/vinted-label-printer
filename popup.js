@@ -341,40 +341,7 @@ async function runDiagnostics() {
 
     log('=== DIAGNOSTIC RESULTS ===', 'info');
     for (const r of results) {
-      if (r.check === 'CSRF Token') {
-        log(`CSRF Token: ${r.value}`, r.value === 'NOT FOUND' ? 'error' : 'success');
-      } else if (r.check === 'Current URL') {
-        log(`Page URL: ${r.value}`, 'info');
-      } else if (r.check && r.check.startsWith('API:')) {
-        const status = r.ok ? 'success' : 'error';
-        let detail = `${r.check} -> HTTP ${r.status}`;
-        if (r.ok && r.count !== undefined) {
-          detail += ` | ${r.count} orders`;
-          if (r.allKeys) detail += ` | Fields: ${r.allKeys.join(', ')}`;
-          if (r.firstOrder) detail += ` | First: ${JSON.stringify(r.firstOrder).substring(0, 300)}`;
-        }
-        log(detail, status);
-      } else if (r.check && r.check.startsWith('Detail:')) {
-        const status = r.ok ? 'success' : 'error';
-        let detail = `${r.check} -> HTTP ${r.status}`;
-        if (r.ok) {
-          if (r.keys) detail += ` | Keys: ${r.keys.join(', ')}`;
-          if (r.shipmentKeys) detail += ` | Shipment: ${r.shipmentKeys.join(', ')}`;
-          if (r.shipmentData) detail += ` | ShipmentData: ${JSON.stringify(r.shipmentData).substring(0, 400)}`;
-          if (r.labelRelatedFields) detail += ` | LabelFields: ${r.labelRelatedFields.join(', ')}`;
-          if (r.fullData) detail += ` | FULL: ${JSON.stringify(r.fullData).substring(0, 500)}`;
-        }
-        log(detail, status);
-      } else if (r.check && r.check.startsWith('Label URL:')) {
-        const status = r.ok ? 'success' : 'error';
-        let detail = `${r.check} -> HTTP ${r.status}`;
-        if (r.ok) {
-          detail += ` | Type: ${r.contentType}`;
-          if (r.isPdf) detail += ' | PDF!';
-          if (r.dataKeys && r.dataKeys.length) detail += ` | Keys: ${r.dataKeys.join(', ')}`;
-        }
-        log(detail, status);
-      }
+      log(r.msg, r.type || 'info');
     }
     log('=== END DIAGNOSTICS ===', 'info');
     log('Please copy ALL text from this log and send it to me!', 'info');
