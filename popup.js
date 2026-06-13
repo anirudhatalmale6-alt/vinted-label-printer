@@ -176,8 +176,14 @@ async function getLabelFromConversation(order) {
         chrome.tabs.onUpdated.addListener(listener);
       });
 
-      // Wait for page to fully render (RSC streaming)
-      await new Promise(r => setTimeout(r, 5000));
+      // Wait for page to fully render (RSC streaming) + scroll to trigger lazy content
+      await new Promise(r => setTimeout(r, 4000));
+      await chrome.scripting.executeScript({
+        target: { tabId: convTab.id },
+        world: 'MAIN',
+        func: () => { window.scrollTo(0, 500); }
+      });
+      await new Promise(r => setTimeout(r, 3000));
 
       // Record tabs before clicking so we can detect + close any new ones
       const tabsBefore = (await chrome.tabs.query({})).map(t => t.id);
@@ -369,7 +375,13 @@ async function scanLabels() {
 
         const modifiedPdf = await addSkuToPdf(pdfBytes, sku);
 
-        const base64Modified = btoa(String.fromCharCode(...new Uint8Array(modifiedPdf)));
+        // Convert to base64 in chunks to avoid stack overflow on large PDFs
+        const bytes = new Uint8Array(modifiedPdf);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 8192) {
+          binary += String.fromCharCode(...bytes.slice(i, i + 8192));
+        }
+        const base64Modified = btoa(binary);
         allLabels.push({
           sku, title: order.title, profile: profileName,
           date: today, pdfBase64: base64Modified,
