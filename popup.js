@@ -168,14 +168,12 @@ async function getLabelFromConversation(order) {
       // Record tabs before clicking so we can detect + close any new ones
       const tabsBefore = (await chrome.tabs.query({})).map(t => t.id);
 
-      // Click the "Wydrukuj etykietę wysyłkową" button and capture the S3 URL
-      // MUST run in MAIN world to override the page's window.open
+      // Click the button AND download the PDF - all in MAIN world to avoid CORS
       const results = await chrome.scripting.executeScript({
         target: { tabId: convTab.id },
         world: 'MAIN',
         func: () => {
           return new Promise((resolve) => {
-            // Override window.open to capture URL without opening a new tab
             const origOpen = window.open;
             let capturedUrl = null;
 
@@ -184,71 +182,78 @@ async function getLabelFromConversation(order) {
               return null;
             };
 
-            // Find the label button - "Wydrukuj etykietę wysyłkową"
-            const allElements = document.querySelectorAll('button, a, [role="button"], span, div');
+            // Find button "Wydrukuj etykietę wysyłkową"
+            const allElements = document.querySelectorAll('button, a, [role="button"]');
             let labelButton = null;
-
-            const buttonTexts = [
-              'wydrukuj etykiet',
-              'etykiet',
-              'print label',
-              'shipping label',
-              'download label',
-              'pobierz etykiet'
-            ];
 
             for (const el of allElements) {
               const text = (el.textContent || '').toLowerCase().trim();
-              for (const bt of buttonTexts) {
-                if (text.includes(bt) && el.tagName !== 'BODY' && el.tagName !== 'HTML' && el.tagName !== 'MAIN') {
-                  // Prefer actual buttons/links
-                  if (el.tagName === 'BUTTON' || el.tagName === 'A') {
-                    labelButton = el;
-                    break;
-                  }
-                  // Or clickable elements
-                  if (!labelButton && (el.onclick || el.getAttribute('role') === 'button' ||
-                      el.closest('button') || el.closest('a'))) {
-                    labelButton = el.closest('button') || el.closest('a') || el;
-                  }
+              if (text.includes('wydrukuj etykiet') || text.includes('etykiet')) {
+                if (el.tagName === 'BUTTON' || el.tagName === 'A') {
+                  labelButton = el;
+                  break;
+                }
+                if (!labelButton) {
+                  labelButton = el.closest('button') || el.closest('a') || el;
                 }
               }
-              if (labelButton && (labelButton.tagName === 'BUTTON' || labelButton.tagName === 'A')) break;
+            }
+
+            // Also try finding by teal/green button style if text search fails
+            if (!labelButton) {
+              document.querySelectorAll('button').forEach(btn => {
+                const text = (btn.textContent || '').toLowerCase();
+                if (text.includes('etykiet') || text.includes('label') || text.includes('wydrukuj')) {
+                  labelButton = btn;
+                }
+              });
             }
 
             if (!labelButton) {
               window.open = origOpen;
-              // Return all button texts for debugging
               const btnTexts = [];
               document.querySelectorAll('button').forEach(b => {
-                btnTexts.push(b.textContent.trim().substring(0, 80));
+                const t = b.textContent.trim().substring(0, 60);
+                if (t) btnTexts.push(t);
               });
-              resolve({
-                found: false,
-                error: 'Button not found. Buttons on page: ' + btnTexts.join(' | ')
-              });
+              resolve({ found: false, error: 'Button not found. Buttons: ' + btnTexts.join(' | ') });
               return;
             }
 
-            // Click it
             labelButton.click();
 
-            // Wait for window.open to fire
+            // Wait for URL, then download PDF in page context (no CORS issues)
             let checks = 0;
-            const interval = setInterval(() => {
+            const interval = setInterval(async () => {
               checks++;
               if (capturedUrl) {
                 clearInterval(interval);
                 window.open = origOpen;
-                resolve({ found: true, url: capturedUrl });
+
+                // Download PDF right here in the page context
+                try {
+                  const resp = await fetch(capturedUrl);
+                  if (!resp.ok) {
+                    resolve({ found: true, url: capturedUrl, error: 'PDF fetch HTTP ' + resp.status });
+                    return;
+                  }
+                  const blob = await resp.blob();
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    const base64 = reader.result.split(',')[1];
+                    resolve({ found: true, url: capturedUrl, pdfBase64: base64, size: blob.size });
+                  };
+                  reader.onerror = () => {
+                    resolve({ found: true, url: capturedUrl, error: 'Failed to read PDF blob' });
+                  };
+                  reader.readAsDataURL(blob);
+                } catch (err) {
+                  resolve({ found: true, url: capturedUrl, error: 'Fetch error: ' + err.message });
+                }
               } else if (checks > 50) {
                 clearInterval(interval);
                 window.open = origOpen;
-                resolve({
-                  found: false,
-                  error: 'Clicked button but no URL captured after 5s. Button text: "' +
-                    labelButton.textContent.trim().substring(0, 50) + '"'
-                });
+                resolve({ found: false, error: 'No URL after 5s. Button: "' + labelButton.textContent.trim().substring(0, 50) + '"' });
               }
             }, 100);
           });
@@ -257,7 +262,7 @@ async function getLabelFromConversation(order) {
 
       const searchResult = results[0]?.result;
 
-      // Close any new tabs that opened (label PDF tabs)
+      // Close any new tabs that opened
       try {
         const tabsAfter = (await chrome.tabs.query({})).map(t => t.id);
         const newTabs = tabsAfter.filter(id => !tabsBefore.includes(id) && id !== convTab.id);
@@ -266,24 +271,11 @@ async function getLabelFromConversation(order) {
         }
       } catch {}
 
-      if (searchResult && searchResult.found && searchResult.url) {
-        log(`Captured S3 URL!`, 'success');
-
-        // Download the PDF from S3
-        const pdfResp = await fetch(searchResult.url);
-        if (pdfResp.ok) {
-          const blob = await pdfResp.blob();
-          if (blob.size > 100) {
-            const reader = new FileReader();
-            const base64 = await new Promise((res) => {
-              reader.onload = () => res(reader.result.split(',')[1]);
-              reader.readAsDataURL(blob);
-            });
-            done({ pdfBase64: base64 });
-            return;
-          }
-        }
-        done({ error: 'Got S3 URL but PDF download failed' });
+      if (searchResult && searchResult.pdfBase64) {
+        log(`Downloaded label (${searchResult.size} bytes)`, 'success');
+        done({ pdfBase64: searchResult.pdfBase64 });
+      } else if (searchResult?.error) {
+        done({ error: searchResult.error });
       } else {
         done({ error: searchResult?.error || 'Could not extract label URL' });
       }
