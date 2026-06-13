@@ -370,24 +370,43 @@ document.getElementById('btnShowCaptured').addEventListener('click', async () =>
   chrome.runtime.sendMessage({ action: 'getCapturedFromBg' }, (data) => {
     const requests = data?.capturedRequests || [];
     const foundUrl = data?.foundLabelUrl;
+    const capturedLabels = data?.capturedLabels || [];
+
+    if (capturedLabels.length > 0) {
+      log(`CAPTURED ${capturedLabels.length} PDF BLOB(s)! Labels are ready!`, 'success');
+      for (const cl of capturedLabels) {
+        log(`  PDF: ${cl.blobType}, ${cl.blobSize} bytes, from ${cl.pageUrl}`, 'success');
+      }
+    }
 
     if (foundUrl) {
-      log(`FOUND LABEL PDF URL: ${foundUrl}`, 'success');
-      log('This is the URL Vinted uses to download labels!', 'success');
+      log(`Found PDF URL: ${foundUrl}`, 'success');
     }
 
     log(`=== CAPTURED REQUESTS (${requests.length}) ===`, 'info');
     for (const r of requests) {
-      const isPdf = (r.contentType || r.mime || '').includes('pdf') ||
-                    (r.contentType || r.mime || '').includes('octet');
-      let detail = '';
-      if (r.type === 'download') {
-        detail = `DOWNLOAD: ${r.url} (${r.mime}) file: ${r.filename}`;
+      let detail = `[${r.source}] `;
+
+      if (r.source === 'blob-capture') {
+        detail += `BLOB: ${r.blobType} (${r.blobSize} bytes) hasData=${r.hasData} from ${r.pageUrl}`;
+        log(detail, 'success');
+      } else if (r.source === 'window-open') {
+        detail += `window.open("${r.url}") from ${r.pageUrl}`;
+        log(detail, 'success');
+      } else if (r.source === 'link-click') {
+        detail += `link click: ${r.href} download="${r.download}"`;
+        log(detail, 'success');
+      } else if (r.source === 'tab-update') {
+        detail += `Tab URL: ${r.url}`;
+        log(detail, 'success');
+      } else if (r.source === 'download') {
+        detail += `Download: ${r.url} (${r.mime}) ${r.filename}`;
+        log(detail, r.mime?.includes('pdf') ? 'success' : 'info');
       } else {
-        detail = `${r.method || 'GET'} ${r.url} -> ${r.status} (${r.contentType || ''})`;
+        detail += `${r.method || 'GET'} ${r.url} -> ${r.status} (${r.contentType || ''})`;
+        if (r.isPdf) detail += ' [PDF!]';
+        log(detail, r.isPdf ? 'success' : 'info');
       }
-      if (isPdf) detail += ' [PDF!]';
-      log(detail, isPdf ? 'success' : 'info');
     }
     log('=== END CAPTURED ===', 'info');
     log('Copy this and send it to me!', 'info');
